@@ -1,0 +1,24 @@
+{
+  "timestamp_utc": "2026-02-13T05:50:49Z",
+  "hash": "6e62b79b330aacf24ebc7ecbd7491ffa6c3a3b8b5a3831b931c49848995d0cb5",
+  "results": [
+    {
+      "chain": "base",
+      "txHash": "0x040fd4f78c50c90a2050d715e6a02ecfb7e6b6e0990eec949828f3df933937b2",
+      "blockNumber": 42086243,
+      "verified": true
+    },
+    {
+      "chain": "bsc",
+      "txHash": "0x27b35ab5a1718639c7109489f88bc470aa92efa8c717be087463548616be9180",
+      "blockNumber": 80924787,
+      "verified": true
+    },
+    {
+      "chain": "solana",
+      "txHash": "2fEt4BdqEwCGfFe7NrzJTD1kZ3v4WiY6QdW8iHoL74VNjfc6iYU6KnjJbZTtKxjnoVubD88qDeGKZcJJy2ksF3Up",
+      "blockNumber": 399923440,
+      "verified": true
+    }
+  ]
+}

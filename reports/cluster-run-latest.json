@@ -1,0 +1,27 @@
+{
+  "config": {
+    "agentCount": 5,
+    "rounds": 30,
+    "concurrency": 5,
+    "useRealHttp": false,
+    "anchorMode": "mock"
+  },
+  "stats": {
+    "totalTasks": 30,
+    "successTasks": 30,
+    "failedTasks": 0,
+    "proofValid": 30,
+    "anchoredTasks": 30,
+    "anchorVerifiedTasks": 30,
+    "durationMsTotal": 2259,
+    "startedAt": "2026-02-13T07:13:39.557Z",
+    "finishedAt": "2026-02-13T07:13:40.037Z"
+  },
+  "derived": {
+    "successRate": 1,
+    "proofValidRate": 1,
+    "anchoredRate": 1,
+    "anchorVerifiedRate": 1,
+    "avgTaskDurationMs": 75
+  }
+}

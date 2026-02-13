@@ -1,0 +1,59 @@
+{
+  "name": "@atel/sdk",
+  "version": "0.1.0",
+  "description": "ATEL Protocol SDK - Agent Trust & Economics Layer",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest --run",
+    "test:perf": "vitest --run tests/performance.test.ts",
+    "wallets:generate": "tsx scripts/generate-test-wallets.ts",
+    "run:cluster": "tsx scripts/agent-cluster-runner.ts",
+    "acceptance:deploy": "tsx scripts/deploy-acceptance.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "quickstart:local": "tsx demo/quickstart-local.ts",
+    "quickstart:network": "tsx demo/quickstart-network.ts",
+    "demo:real": "tsx demo/real-api-demo.ts",
+    "smoke:anchor": "tsx scripts/testnet-anchor-smoke.ts",
+    "serve": "tsx src/service/server.ts",
+    "prepublishOnly": "npm run clean && npm run build && npm test"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "bs58": "^6.0.0",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "tweetnacl": "^1.0.3",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.3",
+    "@types/supertest": "^6.0.3",
+    "@types/uuid": "^10.0.0",
+    "supertest": "^7.2.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
+  },
+  "license": "MIT"
+}

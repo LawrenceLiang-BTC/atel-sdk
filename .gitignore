@@ -1,0 +1,9 @@
+.env*
+!.env.phase05.example
+node_modules/
+dist/
+.npm-cache/
+.qs-data/
+.test-data/
+coverage/
+*.tgz
