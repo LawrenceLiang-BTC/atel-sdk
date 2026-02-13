@@ -205,7 +205,7 @@ score       = base + volume + risk_bonus + consistency   (clamped 0–100)
 ## Current Status (2026-02-13)
 
 - [x] **Phase 0 MVP complete** — 13 modules implemented, core trust workflow end-to-end
-- [x] **230 tests in suite** — unit/integration coverage across modules
+- [x] **241 tests in suite** — unit/integration coverage across modules
 - [x] **Demo coverage** — success path + failure scenarios
 - [ ] **Phase 0.5 validation** — real agents + real external tools + real testnet anchoring
 
