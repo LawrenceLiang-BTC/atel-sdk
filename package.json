@@ -1,5 +1,5 @@
 {
-  "name": "@atel/sdk",
+  "name": "@lawreneliang/atel-sdk",
   "version": "0.1.0",
   "description": "ATEL Protocol SDK - Agent Trust & Economics Layer",
   "type": "module",

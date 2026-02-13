@@ -15,7 +15,7 @@ ATEL_PORT=3100 ATEL_DATA_DIR=./data npm run serve
 ## 2) SDK side wiring
 
 ```ts
-import { ATELOrchestrator, HttpTrustSyncAdapter } from '@atel/sdk';
+import { ATELOrchestrator, HttpTrustSyncAdapter } from '@lawreneliang/atel-sdk';
 
 const orchestrator = new ATELOrchestrator({
   trustSync: new HttpTrustSyncAdapter({

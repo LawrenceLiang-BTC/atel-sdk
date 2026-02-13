@@ -5,7 +5,7 @@ This document is the detailed module-level API guide for the current SDK.
 ## Installation
 
 ```bash
-npm install @atel/sdk
+npm install @lawreneliang/atel-sdk
 ```
 
 ## Modules
@@ -149,7 +149,7 @@ npm install @atel/sdk
 Example:
 
 ```ts
-import { ATELOrchestrator, HttpTrustSyncAdapter } from '@atel/sdk';
+import { ATELOrchestrator, HttpTrustSyncAdapter } from '@lawreneliang/atel-sdk';
 
 const orchestrator = new ATELOrchestrator({
   trustSync: new HttpTrustSyncAdapter({

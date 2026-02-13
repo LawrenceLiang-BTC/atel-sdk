@@ -40,7 +40,7 @@ This verifies local flow and optional connectivity checks.
 Use SDK directly without `trustSync`:
 
 ```ts
-import { ATELOrchestrator } from '@atel/sdk';
+import { ATELOrchestrator } from '@lawreneliang/atel-sdk';
 const orchestrator = new ATELOrchestrator();
 ```
 
@@ -61,7 +61,7 @@ ATEL_PORT=3100 ATEL_DATA_DIR=./data npm run serve
 Use sync adapter:
 
 ```ts
-import { ATELOrchestrator, HttpTrustSyncAdapter } from '@atel/sdk';
+import { ATELOrchestrator, HttpTrustSyncAdapter } from '@lawreneliang/atel-sdk';
 
 const orchestrator = new ATELOrchestrator({
   trustSync: new HttpTrustSyncAdapter({ baseUrl: 'http://127.0.0.1:3100' }),
