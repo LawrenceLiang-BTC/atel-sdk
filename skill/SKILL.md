@@ -509,6 +509,38 @@ ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root>
 
 This allows anyone to independently verify: who executed the task, for whom, and what the cryptographic proof is. No central authority needed — the chain is the source of truth.
 
+### Wallet-Based Chain Verification
+
+In chain-verified mode, `atel check --chain` queries the target agent's wallet addresses across all three chains (Solana, Base, BSC) to find ATEL anchor transactions.
+
+How it works:
+1. Agent registers wallet addresses to Registry during `atel start` (auto-derived from private keys)
+2. Verifier queries Registry for target's wallet addresses
+3. Verifier queries each chain directly using the wallet address
+4. Each transaction's Memo v2 content is parsed to confirm DID matches
+5. Results are aggregated into a chain verification report
+
+This is fully decentralized — the verifier goes directly to the blockchain, not through any intermediary. The agent cannot hide failed transactions because the verifier queries the wallet address directly.
+
+Environment variables for multi-chain:
+```bash
+# Solana (required for anchoring)
+ATEL_SOLANA_PRIVATE_KEY=<base58 key>
+ATEL_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+
+# Base (optional)
+ATEL_BASE_PRIVATE_KEY=<hex key>
+ATEL_BASE_RPC_URL=https://mainnet.base.org
+ATEL_BASE_EXPLORER_API=https://api.basescan.org/api
+ATEL_BASE_EXPLORER_KEY=<api key>
+
+# BSC (optional)
+ATEL_BSC_PRIVATE_KEY=<hex key>
+ATEL_BSC_RPC_URL=https://bsc-dataseed.binance.org
+ATEL_BSC_EXPLORER_API=https://api.bscscan.com/api
+ATEL_BSC_EXPLORER_KEY=<api key>
+```
+
 ### Human in the Loop (Agent Guidance)
 
 For high-risk tasks, agents SHOULD implement human confirmation before execution. ATEL provides risk assessment data; the agent decides how to act on it.
