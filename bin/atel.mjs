@@ -24,6 +24,7 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
+  RollbackManager,
 } from '@lawreneliang/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -156,6 +157,24 @@ async function cmdStart(port) {
   // ── Trust Score Client ──
   const trustScoreClient = new TrustScoreClient();
 
+  // ── Nonce Store (anti-replay) ──
+  const nonceFile = join(ATEL_DIR, 'nonces.json');
+  const usedNonces = new Set((() => { try { return JSON.parse(readFileSync(nonceFile, 'utf8')); } catch { return []; } })());
+  const saveNonces = () => { try { writeFileSync(nonceFile, JSON.stringify([...usedNonces].slice(-10000))); } catch {} };
+
+  // ── Helper: generate rejection Proof (local only, no on-chain) ──
+  function generateRejectionProof(from, action, reason, stage) {
+    const rejectId = `reject-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const trace = new ExecutionTrace(rejectId, id);
+    trace.append('TASK_RECEIVED', { from, action });
+    trace.append(stage, { result: 'rejected', reason });
+    trace.fail(new Error(reason));
+    const proofGen = new ProofGenerator(trace, id);
+    const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `rejected-from-${from}`, reason);
+    log({ event: 'rejection_proof', rejectId, from, action, stage, reason, proof_id: proof.proof_id, trace_root: proof.trace_root, timestamp: new Date().toISOString() });
+    return { proof_id: proof.proof_id, trace_root: proof.trace_root };
+  }
+
   // Result callback: POST /atel/v1/result (executor calls this when done)
   endpoint.app?.post?.('/atel/v1/result', async (req, res) => {
     const { taskId, result, success } = req.body || {};
@@ -173,8 +192,33 @@ async function cmdStart(port) {
     trace.append('CONTENT_AUDIT', { result: 'passed' });
     trace.append('TASK_FORWARDED', { executor_url: EXECUTOR_URL, timestamp: task.acceptedAt });
     trace.append('EXECUTOR_RESULT', { success: success !== false, duration_ms: durationMs, result_size: JSON.stringify(result).length });
-    if (success !== false) trace.finalize(typeof result === 'object' ? result : { result });
-    else trace.fail(new Error(result?.error || 'Execution failed'));
+
+    // ── Rollback on failure ──
+    let rollbackReport = null;
+    if (success === false) {
+      trace.append('TASK_FAILED', { error: result?.error || 'Execution failed' });
+      const rollback = new RollbackManager();
+      // Register compensation: notify sender of failure
+      rollback.registerCompensation('Notify sender of task failure', async () => {
+        log({ event: 'rollback_notify', taskId, to: task.from, message: 'Task failed, compensating' });
+      });
+      // If executor reported side effects that need rollback
+      if (result?.sideEffects && Array.isArray(result.sideEffects)) {
+        for (const effect of result.sideEffects) {
+          rollback.registerCompensation(effect.description || 'Undo side effect', async () => {
+            if (effect.compensateUrl) {
+              await fetch(effect.compensateUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(effect.compensatePayload || {}), signal: AbortSignal.timeout(10000) });
+            }
+          });
+        }
+      }
+      rollbackReport = await rollback.rollbackAll();
+      trace.append('ROLLBACK', { total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed });
+      trace.fail(new Error(result?.error || 'Execution failed'));
+      log({ event: 'rollback_executed', taskId, total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed });
+    } else {
+      trace.finalize(typeof result === 'object' ? result : { result });
+    }
 
     // ── Proof Generation ──
     const proofGen = new ProofGenerator(trace, id);
@@ -253,6 +297,7 @@ async function cmdStart(port) {
           proof: { proof_id: proof.proof_id, trace_root: proof.trace_root, events_count: trace.events.length },
           anchor: anchor ? { chain: 'solana', txHash: anchor.txHash, block: anchor.blockNumber } : null,
           execution: { duration_ms: durationMs, encrypted: task.encrypted },
+          rollback: rollbackReport ? { total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed } : null,
         };
 
         if (isRelay) {
@@ -306,22 +351,41 @@ async function cmdStart(port) {
 
     const action = payload.action || payload.type || 'unknown';
 
-    // Protocol-level content audit (SDK layer)
+    // ── Nonce anti-replay check ──
+    const nonce = payload.nonce || message.nonce;
+    if (nonce) {
+      if (usedNonces.has(nonce)) {
+        const rp = generateRejectionProof(message.from, action, 'Replay detected: nonce already used', 'REPLAY_REJECTED');
+        log({ event: 'task_rejected', from: message.from, action, reason: 'Replay: duplicate nonce', nonce, timestamp: new Date().toISOString() });
+        return { status: 'rejected', error: 'Replay detected: nonce already used', proof: rp };
+      }
+      usedNonces.add(nonce);
+      saveNonces();
+    }
+
+    // ── Protocol-level content audit (SDK layer) ──
     const auditor = new ContentAuditor();
     const auditResult = auditor.audit(payload, { action, from: message.from });
     if (!auditResult.safe) {
+      const rp = generateRejectionProof(message.from, action, `Content audit: ${auditResult.reason}`, 'CONTENT_AUDIT_FAILED');
       log({ event: 'task_rejected', from: message.from, action, reason: `Content audit: ${auditResult.reason}`, severity: auditResult.severity, pattern: auditResult.pattern, timestamp: new Date().toISOString() });
-      return { status: 'rejected', error: `Security: ${auditResult.reason}`, severity: auditResult.severity };
+      return { status: 'rejected', error: `Security: ${auditResult.reason}`, severity: auditResult.severity, proof: rp };
     }
 
-    // Policy check
+    // ── Policy check ──
     const pc = enforcer.check(message);
-    if (!pc.allowed) { log({ event: 'task_rejected', from: message.from, action, reason: pc.reason, timestamp: new Date().toISOString() }); return { status: 'rejected', error: pc.reason }; }
+    if (!pc.allowed) {
+      const rp = generateRejectionProof(message.from, action, pc.reason, 'POLICY_VIOLATION');
+      log({ event: 'task_rejected', from: message.from, action, reason: pc.reason, timestamp: new Date().toISOString() });
+      return { status: 'rejected', error: pc.reason, proof: rp };
+    }
 
-    // Capability check
+    // ── Capability check ──
     if (capTypes.length > 0 && !capTypes.includes(action) && !capTypes.includes('general')) {
-      log({ event: 'task_rejected', from: message.from, action, reason: `Outside capability: [${capTypes.join(',')}]`, timestamp: new Date().toISOString() });
-      return { status: 'rejected', error: `Action "${action}" outside capability boundary`, capabilities: capTypes };
+      const reason = `Outside capability: [${capTypes.join(',')}]`;
+      const rp = generateRejectionProof(message.from, action, reason, 'CAPABILITY_REJECTED');
+      log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
+      return { status: 'rejected', error: `Action "${action}" outside capability boundary`, capabilities: capTypes, proof: rp };
     }
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
