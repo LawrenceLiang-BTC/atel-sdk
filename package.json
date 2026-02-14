@@ -1,6 +1,6 @@
 {
   "name": "@lawreneliang/atel-sdk",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "ATEL Protocol SDK - Agent Trust & Exchange Layer",
   "type": "module",
   "main": "./dist/index.js",

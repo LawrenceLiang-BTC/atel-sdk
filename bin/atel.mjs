@@ -452,8 +452,9 @@ async function cmdStart(port) {
     try {
       const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
       const bestDirect = networkConfig.candidates.find(c => c.type !== 'relay') || networkConfig.candidates[0];
-      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates }, id);
-      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length });
+      const discoverable = policy.discoverable !== false;
+      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable }, id);
+      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable });
     } catch (e) { log({ event: 'auto_register_failed', error: e.message }); }
   }
 
@@ -567,14 +568,15 @@ async function cmdInbox(count) {
 
 async function cmdRegister(name, capabilities, endpointUrl) {
   const id = requireIdentity();
+  const policy = loadPolicy();
   const caps = (capabilities || 'general').split(',').map(c => ({ type: c.trim(), description: c.trim() }));
   saveCapabilities(caps);
-  // If no endpoint provided, use saved network config
   let ep = endpointUrl;
   if (!ep) { const net = loadNetwork(); ep = net?.endpoint || 'http://localhost:3100'; }
+  const discoverable = policy.discoverable !== false;
   const client = new RegistryClient({ registryUrl: REGISTRY_URL });
-  const entry = await client.register({ name: name || id.agent_id, capabilities: caps, endpoint: ep }, id);
-  console.log(JSON.stringify({ status: 'registered', did: entry.did, name: entry.name, capabilities: caps.map(c => c.type), endpoint: ep, registry: REGISTRY_URL }, null, 2));
+  const entry = await client.register({ name: name || id.agent_id, capabilities: caps, endpoint: ep, discoverable }, id);
+  console.log(JSON.stringify({ status: 'registered', did: entry.did, name: entry.name, capabilities: caps.map(c => c.type), endpoint: ep, discoverable, registry: REGISTRY_URL }, null, 2));
 }
 
 async function cmdSearch(capability) {
