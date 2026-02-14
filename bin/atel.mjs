@@ -360,7 +360,7 @@ async function cmdStart(port) {
 
     // Ignore task-result messages (these are responses, not new tasks)
     if (message.type === 'task-result' || payload.status === 'completed' || payload.status === 'failed') {
-      log({ event: 'result_received', from: message.from, taskId: payload.taskId, status: payload.status, timestamp: new Date().toISOString() });
+      log({ event: 'result_received', type: 'task-result', from: message.from, taskId: payload.taskId, status: payload.status, proof: payload.proof || null, anchor: payload.anchor || null, execution: payload.execution || null, result: payload.result || null, timestamp: new Date().toISOString() });
       return { status: 'ok', message: 'Result received' };
     }
 
@@ -727,12 +727,41 @@ async function cmdTask(target, taskJson) {
 
     // Step 3: send task
     const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload, secretKey: id.secretKey });
-    const result = await relaySend('/atel/v1/task', msg);
+    const relayAck = await relaySend('/atel/v1/task', msg);
 
-    console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: 'relay', result }, null, 2));
+    console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: 'relay', relay_ack: relayAck, note: 'Relay mode is async. Waiting for result (up to 120s)...' }));
+
+    // Wait for result to arrive in inbox (poll for task-result)
+    const taskId = msg.id || msg.payload?.taskId;
+    let result = null;
+    const waitStart = Date.now();
+    const WAIT_TIMEOUT = 120000; // 2 minutes
+    while (Date.now() - waitStart < WAIT_TIMEOUT) {
+      await new Promise(r => setTimeout(r, 3000)); // poll every 3s
+      if (existsSync(INBOX_FILE)) {
+        const lines = readFileSync(INBOX_FILE, 'utf-8').split('\n').filter(l => l.trim());
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const entry = JSON.parse(lines[i]);
+            // Look for result_received from the target
+            if (entry.event === 'result_received' && entry.from === remoteDid) {
+              result = { taskId: entry.taskId, status: entry.status, result: entry.result, proof: entry.proof, anchor: entry.anchor, execution: entry.execution };
+              break;
+            }
+          } catch {}
+        }
+        if (result) break;
+      }
+    }
+
+    if (result) {
+      console.log(JSON.stringify({ status: 'task_completed', remoteDid, via: 'relay', result }, null, 2));
+    } else {
+      console.log(JSON.stringify({ status: 'task_sent_no_result', remoteDid, via: 'relay', note: 'Result not received within timeout. Check: atel inbox' }, null, 2));
+    }
 
     // Update local trust history
-    const success = result?.status !== 'rejected' && result?.status !== 'failed';
+    const success = result?.status === 'completed' || (result && result?.status !== 'rejected' && result?.status !== 'failed');
     const proofInfo = result?.proof ? { proof_id: result.proof.proof_id, trace_root: result.proof.trace_root, verified: !!result?.anchor?.txHash, anchor_tx: result?.anchor?.txHash || null, timestamp: new Date().toISOString() } : null;
     if (remoteDid) updateTrustHistory(remoteDid, success, proofInfo);
   } else {
