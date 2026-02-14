@@ -807,6 +807,19 @@ async function cmdTask(target, taskJson) {
     if (!remoteDid) {
       const h = await client.health(remoteEndpoint); remoteDid = h.did;
     }
+
+    // Trust check for direct mode too
+    if (!force && remoteDid) {
+      const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
+      let history = {};
+      try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
+      const agentHistory = history[remoteDid] || { tasks: 0, successes: 0, failures: 0, proofs: [] };
+      const trustLevel = computeTrustLevel(agentHistory);
+      if (!riskAllowed(trustLevel.maxRisk, risk)) {
+        console.log(JSON.stringify({ status: 'blocked', reason: `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`, did: remoteDid, level: trustLevel.level, maxRisk: trustLevel.maxRisk }));
+        process.exit(1);
+      }
+    }
     await client.handshake(remoteEndpoint, hsManager, remoteDid);
     let sessions = {}; if (existsSync(sf)) sessions = JSON.parse(readFileSync(sf, 'utf-8'));
     sessions[remoteEndpoint] = { did: remoteDid };
