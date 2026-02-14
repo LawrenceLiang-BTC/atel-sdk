@@ -7,3 +7,4 @@ dist/
 .test-data/
 coverage/
 *.tgz
+.DS_Store

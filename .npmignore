@@ -1,0 +1,12 @@
+src/
+tests/
+demo/
+scripts/
+docs/
+.test-data/
+*.ts
+!*.d.ts
+tsconfig.json
+vitest.config.*
+.github/
+.gitignore

@@ -1,7 +1,7 @@
 {
   "name": "@lawreneliang/atel-sdk",
-  "version": "0.1.0",
-  "description": "ATEL Protocol SDK - Agent Trust & Economics Layer",
+  "version": "0.5.3",
+  "description": "ATEL Protocol SDK - Agent Trust & Exchange Layer",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
@@ -11,8 +11,13 @@
     }
   },
   "types": "./dist/index.d.ts",
+  "bin": {
+    "atel": "./bin/atel.mjs"
+  },
   "files": [
     "dist",
+    "bin",
+    "skill",
     "README.md",
     "LICENSE"
   ],
@@ -21,6 +26,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:release": "tsc && tsx scripts/obfuscate.ts",
     "clean": "rm -rf dist",
     "test": "vitest --run",
     "test:perf": "vitest --run tests/performance.test.ts",
@@ -33,7 +39,7 @@
     "demo:real": "tsx demo/real-api-demo.ts",
     "smoke:anchor": "tsx scripts/testnet-anchor-smoke.ts",
     "serve": "tsx src/service/server.ts",
-    "prepublishOnly": "npm run clean && npm run build && npm test"
+    "prepublishOnly": "npm run clean && npm run build:release && npm test"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
@@ -42,6 +48,7 @@
     "bs58": "^6.0.0",
     "ethers": "^6.16.0",
     "express": "^5.2.1",
+    "nat-upnp": "^1.1.1",
     "tweetnacl": "^1.0.3",
     "uuid": "^11.1.0"
   },
@@ -50,10 +57,11 @@
     "@types/node": "^25.2.3",
     "@types/supertest": "^6.0.3",
     "@types/uuid": "^10.0.0",
+    "javascript-obfuscator": "^5.3.0",
     "supertest": "^7.2.2",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   },
-  "license": "MIT"
+  "license": "UNLICENSED"
 }

@@ -1,8 +1,10 @@
 /**
  * Module 7: Trust Score Client
  *
- * Local reputation scoring for agents based on execution history.
- * MVP implementation — all data stored in-memory, no network calls.
+ * Local reputation scoring for agents based on on-chain proof records.
+ *
+ * Data source: On-chain anchored proofs (not agent self-reported summaries).
+ * Each proof record is verified against the blockchain before being counted.
  *
  * Score formula (0–100):
  *   base        = success_rate × 60
@@ -12,7 +14,39 @@
  *   final       = base + volume + risk_bonus + consistency
  */
 
+import type { AnchorProvider, AnchorRecord } from '../anchor/index.js';
+
 // ─── Types ───────────────────────────────────────────────────────
+
+/** On-chain proof record with execution metadata */
+export interface OnChainProofRecord {
+  /** Proof trace root (the hash anchored on-chain) */
+  traceRoot: string;
+  /** On-chain transaction hash */
+  txHash: string;
+  /** Chain identifier */
+  chain: string;
+  /** Executor DID */
+  executor: string;
+  /** Task sender DID */
+  taskFrom: string;
+  /** Action/task type */
+  action: string;
+  /** Whether the task completed successfully */
+  success: boolean;
+  /** Execution duration in milliseconds */
+  durationMs: number;
+  /** Risk level */
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  /** Number of policy violations */
+  policyViolations: number;
+  /** Proof ID */
+  proofId: string;
+  /** Anchor timestamp (from chain or local) */
+  timestamp: string;
+  /** Whether this record has been verified on-chain */
+  verified: boolean;
+}
 
 /** Summary of a single task execution, submitted after completion */
 export interface ExecutionSummary {
@@ -54,6 +88,8 @@ export interface ScoreReport {
   risk_distribution: Record<string, number>;
   /** Active risk flags */
   risk_flags: string[];
+  /** Number of on-chain verified records */
+  verified_count: number;
   /** ISO 8601 timestamp of last update */
   last_updated: string;
 }
@@ -80,39 +116,105 @@ export const FLAG_HAS_VIOLATIONS = 'HAS_VIOLATIONS';
 export const FLAG_LOW_RISK_ONLY = 'LOW_RISK_ONLY';
 /** More than 50% of the last 10 tasks failed */
 export const FLAG_RECENT_FAILURES = 'RECENT_FAILURES';
+/** Agent has no on-chain verified proofs */
+export const FLAG_NO_VERIFIED_PROOFS = 'NO_VERIFIED_PROOFS';
 
 // ─── Trust Score Client ──────────────────────────────────────────
 
 /**
  * Local trust-score engine.
  *
- * Tracks execution summaries per agent and computes a reputation score
- * based on success rate, task volume, risk handling, and policy compliance.
+ * Primary data source: on-chain proof records (OnChainProofRecord).
+ * Fallback: legacy ExecutionSummary (for backward compatibility).
+ *
+ * Agents query another agent's on-chain proof history, then feed it
+ * into this client to compute a trust score locally.
  */
 export class TrustScoreClient {
-  /** In-memory store: agent DID → execution summaries */
+  /** In-memory store: agent DID → execution summaries (legacy) */
   private readonly store: Map<string, ExecutionSummary[]> = new Map();
+  /** On-chain proof records: agent DID → proof records */
+  private readonly proofStore: Map<string, OnChainProofRecord[]> = new Map();
+  /** Optional anchor provider for on-chain verification */
+  private anchorProvider?: AnchorProvider;
 
-  constructor() {
-    // Intentionally empty — MVP uses in-memory storage only
+  constructor(anchorProvider?: AnchorProvider) {
+    this.anchorProvider = anchorProvider;
   }
 
   /**
-   * Submit an execution summary and update the agent's score data.
+   * Set the anchor provider for on-chain verification.
+   */
+  setAnchorProvider(provider: AnchorProvider): void {
+    this.anchorProvider = provider;
+  }
+
+  /**
+   * Add an on-chain proof record for an agent.
+   * This is the primary data ingestion method.
    *
-   * @param summary - The execution summary to record.
-   * @throws If required fields are missing or invalid.
+   * @param record - The on-chain proof record.
+   */
+  addProofRecord(record: OnChainProofRecord): void {
+    if (!record.executor) throw new Error('OnChainProofRecord.executor is required');
+    if (!record.txHash) throw new Error('OnChainProofRecord.txHash is required');
+
+    const existing = this.proofStore.get(record.executor);
+    if (existing) {
+      // Deduplicate by txHash
+      if (!existing.some(r => r.txHash === record.txHash)) {
+        existing.push(record);
+      }
+    } else {
+      this.proofStore.set(record.executor, [record]);
+    }
+  }
+
+  /**
+   * Verify an on-chain proof record against the blockchain.
+   * Updates the record's verified flag.
+   *
+   * @param record - The record to verify.
+   * @returns Whether the verification succeeded.
+   */
+  async verifyProofRecord(record: OnChainProofRecord): Promise<boolean> {
+    if (!this.anchorProvider) return false;
+    try {
+      const result = await this.anchorProvider.verify(record.traceRoot, record.txHash);
+      record.verified = result.valid;
+      return result.valid;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Verify all unverified proof records for an agent.
+   *
+   * @param agentId - The agent's DID.
+   * @returns Number of newly verified records.
+   */
+  async verifyAllRecords(agentId: string): Promise<number> {
+    const records = this.proofStore.get(agentId);
+    if (!records) return 0;
+    let verified = 0;
+    for (const r of records) {
+      if (!r.verified) {
+        const ok = await this.verifyProofRecord(r);
+        if (ok) verified++;
+      }
+    }
+    return verified;
+  }
+
+  /**
+   * Submit an execution summary (legacy method, backward compatible).
+   * Prefer addProofRecord() for new integrations.
    */
   submitExecutionSummary(summary: ExecutionSummary): void {
-    if (!summary.executor) {
-      throw new Error('ExecutionSummary.executor is required');
-    }
-    if (!summary.task_id) {
-      throw new Error('ExecutionSummary.task_id is required');
-    }
-    if (summary.duration_ms < 0) {
-      throw new Error('ExecutionSummary.duration_ms must be non-negative');
-    }
+    if (!summary.executor) throw new Error('ExecutionSummary.executor is required');
+    if (!summary.task_id) throw new Error('ExecutionSummary.task_id is required');
+    if (summary.duration_ms < 0) throw new Error('ExecutionSummary.duration_ms must be non-negative');
 
     const existing = this.store.get(summary.executor);
     if (existing) {
@@ -124,170 +226,159 @@ export class TrustScoreClient {
 
   /**
    * Get the score report for a specific agent.
-   *
-   * @param agentId - The agent's DID.
-   * @returns The computed ScoreReport, or a zero-score report if unknown.
+   * Uses on-chain proof records as primary source, falls back to legacy summaries.
    */
   getAgentScore(agentId: string): ScoreReport {
+    const proofRecords = this.proofStore.get(agentId);
+
+    // If we have on-chain proof records, use them (primary source)
+    if (proofRecords && proofRecords.length > 0) {
+      return this.computeScoreFromProofs(agentId, proofRecords);
+    }
+
+    // Fallback to legacy summaries
     const summaries = this.store.get(agentId);
-    if (!summaries || summaries.length === 0) {
-      return {
-        agent_id: agentId,
-        trust_score: 0,
-        total_tasks: 0,
-        success_rate: 0,
-        avg_duration_ms: 0,
-        risk_distribution: {},
-        risk_flags: [],
-        last_updated: new Date().toISOString(),
-      };
+    if (summaries && summaries.length > 0) {
+      return this.computeScoreFromSummaries(agentId, summaries);
     }
-
-    const totalTasks = summaries.length;
-    const successCount = summaries.filter((s) => s.success).length;
-    const successRate = successCount / totalTasks;
-    const avgDuration =
-      summaries.reduce((sum, s) => sum + s.duration_ms, 0) / totalTasks;
-
-    // Risk distribution
-    const riskDist: Record<string, number> = {};
-    for (const s of summaries) {
-      riskDist[s.risk_level] = (riskDist[s.risk_level] ?? 0) + 1;
-    }
-
-    const trustScore = this.calculateScore(agentId);
-    const riskFlags = this.getRiskFlags(agentId);
 
     return {
       agent_id: agentId,
-      trust_score: trustScore,
-      total_tasks: totalTasks,
-      success_rate: successRate,
-      avg_duration_ms: Math.round(avgDuration),
-      risk_distribution: riskDist,
-      risk_flags: riskFlags,
+      trust_score: 0,
+      total_tasks: 0,
+      success_rate: 0,
+      avg_duration_ms: 0,
+      risk_distribution: {},
+      risk_flags: [],
+      verified_count: 0,
       last_updated: new Date().toISOString(),
     };
   }
 
   /**
    * Get score reports for all tracked agents.
-   *
-   * @returns Array of ScoreReport objects.
    */
   getAllScores(): ScoreReport[] {
-    const reports: ScoreReport[] = [];
-    for (const agentId of this.store.keys()) {
-      reports.push(this.getAgentScore(agentId));
-    }
-    return reports;
+    const agentIds = new Set([...this.proofStore.keys(), ...this.store.keys()]);
+    return [...agentIds].map(id => this.getAgentScore(id));
   }
 
   /**
    * Export all stored data as a JSON-serializable snapshot.
-   *
-   * @returns A ScoreExport object.
    */
   exportData(): ScoreExport {
     const summaries: Record<string, ExecutionSummary[]> = {};
     for (const [agentId, entries] of this.store.entries()) {
       summaries[agentId] = [...entries];
     }
-
     return {
       exported_at: new Date().toISOString(),
-      agent_count: this.store.size,
+      agent_count: new Set([...this.proofStore.keys(), ...this.store.keys()]).size,
       summaries,
       reports: this.getAllScores(),
     };
   }
 
-  // ─── Internal Methods ────────────────────────────────────────
+  // ─── Score Computation from On-Chain Proofs ──────────────────
 
-  /**
-   * Calculate the trust score for an agent.
-   *
-   * Formula:
-   *   base        = success_rate × 60
-   *   volume      = min(total / 100, 1) × 15
-   *   risk_bonus  = (high_risk_successes / total) × 15
-   *   consistency = (1 − violation_rate) × 10
-   *   score       = clamp(base + volume + risk_bonus + consistency, 0, 100)
-   *
-   * @param agentId - The agent's DID.
-   * @returns Trust score between 0 and 100.
-   */
-  private calculateScore(agentId: string): number {
-    const summaries = this.store.get(agentId);
-    if (!summaries || summaries.length === 0) return 0;
-
-    const total = summaries.length;
-    const successCount = summaries.filter((s) => s.success).length;
+  private computeScoreFromProofs(agentId: string, records: OnChainProofRecord[]): ScoreReport {
+    const total = records.length;
+    const successCount = records.filter(r => r.success).length;
     const successRate = successCount / total;
+    const avgDuration = records.reduce((sum, r) => sum + (r.durationMs || 0), 0) / total;
+    const verifiedCount = records.filter(r => r.verified).length;
 
-    // Base score: success rate × 60
+    // Risk distribution
+    const riskDist: Record<string, number> = {};
+    for (const r of records) {
+      const level = r.riskLevel || 'low';
+      riskDist[level] = (riskDist[level] ?? 0) + 1;
+    }
+
+    // Score calculation (same formula)
     const base = successRate * 60;
-
-    // Volume bonus: scales linearly up to 100 tasks
     const volume = Math.min(total / 100, 1) * 15;
-
-    // Risk bonus: proportion of successful high/critical risk tasks
-    const highRiskSuccesses = summaries.filter(
-      (s) => (s.risk_level === 'high' || s.risk_level === 'critical') && s.success
+    const highRiskSuccesses = records.filter(
+      r => (r.riskLevel === 'high' || r.riskLevel === 'critical') && r.success
     ).length;
     const riskBonus = (highRiskSuccesses / total) * 15;
-
-    // Consistency bonus: inversely proportional to violation rate
-    const totalViolations = summaries.reduce(
-      (sum, s) => sum + s.policy_violations,
-      0
-    );
+    const totalViolations = records.reduce((sum, r) => sum + (r.policyViolations || 0), 0);
     const violationRate = totalViolations / total;
     const consistency = (1 - Math.min(violationRate, 1)) * 10;
 
-    const score = base + volume + riskBonus + consistency;
-    return Math.round(Math.min(100, Math.max(0, score)) * 100) / 100;
+    let score = base + volume + riskBonus + consistency;
+
+    // Verification bonus: verified proofs are more trustworthy
+    // If less than 50% of records are verified, apply a penalty
+    if (verifiedCount < total * 0.5 && total > 5) {
+      score *= 0.8; // 20% penalty for mostly unverified records
+    }
+
+    score = Math.round(Math.min(100, Math.max(0, score)) * 100) / 100;
+
+    // Risk flags
+    const flags: string[] = [];
+    if (successRate < 0.5) flags.push(FLAG_LOW_SUCCESS_RATE);
+    if (records.some(r => (r.policyViolations || 0) > 0)) flags.push(FLAG_HAS_VIOLATIONS);
+    if (records.every(r => r.riskLevel === 'low') && total > 50) flags.push(FLAG_LOW_RISK_ONLY);
+    const recent = records.slice(-10);
+    if (recent.length >= 2 && recent.filter(r => !r.success).length / recent.length > 0.5) flags.push(FLAG_RECENT_FAILURES);
+    if (verifiedCount === 0 && total > 0) flags.push(FLAG_NO_VERIFIED_PROOFS);
+
+    return {
+      agent_id: agentId,
+      trust_score: score,
+      total_tasks: total,
+      success_rate: successRate,
+      avg_duration_ms: Math.round(avgDuration),
+      risk_distribution: riskDist,
+      risk_flags: flags,
+      verified_count: verifiedCount,
+      last_updated: new Date().toISOString(),
+    };
   }
 
-  /**
-   * Detect risk flags for an agent based on their execution history.
-   *
-   * @param agentId - The agent's DID.
-   * @returns Array of risk flag strings.
-   */
-  private getRiskFlags(agentId: string): string[] {
-    const summaries = this.store.get(agentId);
-    if (!summaries || summaries.length === 0) return [];
+  // ─── Legacy Score Computation (from self-reported summaries) ──
+
+  private computeScoreFromSummaries(agentId: string, summaries: ExecutionSummary[]): ScoreReport {
+    const total = summaries.length;
+    const successCount = summaries.filter(s => s.success).length;
+    const successRate = successCount / total;
+    const avgDuration = summaries.reduce((sum, s) => sum + s.duration_ms, 0) / total;
+
+    const riskDist: Record<string, number> = {};
+    for (const s of summaries) {
+      riskDist[s.risk_level] = (riskDist[s.risk_level] ?? 0) + 1;
+    }
+
+    const base = successRate * 60;
+    const volume = Math.min(total / 100, 1) * 15;
+    const highRiskSuccesses = summaries.filter(
+      s => (s.risk_level === 'high' || s.risk_level === 'critical') && s.success
+    ).length;
+    const riskBonus = (highRiskSuccesses / total) * 15;
+    const totalViolations = summaries.reduce((sum, s) => sum + s.policy_violations, 0);
+    const violationRate = totalViolations / total;
+    const consistency = (1 - Math.min(violationRate, 1)) * 10;
+    const score = Math.round(Math.min(100, Math.max(0, base + volume + riskBonus + consistency)) * 100) / 100;
 
     const flags: string[] = [];
-    const total = summaries.length;
-    const successCount = summaries.filter((s) => s.success).length;
-    const successRate = successCount / total;
-
-    // LOW_SUCCESS_RATE: overall success rate below 50%
-    if (successRate < 0.5) {
-      flags.push(FLAG_LOW_SUCCESS_RATE);
-    }
-
-    // HAS_VIOLATIONS: any policy violations at all
-    const hasViolations = summaries.some((s) => s.policy_violations > 0);
-    if (hasViolations) {
-      flags.push(FLAG_HAS_VIOLATIONS);
-    }
-
-    // LOW_RISK_ONLY: only low-risk tasks and more than 50
-    const allLowRisk = summaries.every((s) => s.risk_level === 'low');
-    if (allLowRisk && total > 50) {
-      flags.push(FLAG_LOW_RISK_ONLY);
-    }
-
-    // RECENT_FAILURES: >50% failure in the last 10 tasks
+    if (successRate < 0.5) flags.push(FLAG_LOW_SUCCESS_RATE);
+    if (summaries.some(s => s.policy_violations > 0)) flags.push(FLAG_HAS_VIOLATIONS);
+    if (summaries.every(s => s.risk_level === 'low') && total > 50) flags.push(FLAG_LOW_RISK_ONLY);
     const recent = summaries.slice(-10);
-    const recentFailures = recent.filter((s) => !s.success).length;
-    if (recent.length >= 2 && recentFailures / recent.length > 0.5) {
-      flags.push(FLAG_RECENT_FAILURES);
-    }
+    if (recent.length >= 2 && recent.filter(s => !s.success).length / recent.length > 0.5) flags.push(FLAG_RECENT_FAILURES);
 
-    return flags;
+    return {
+      agent_id: agentId,
+      trust_score: score,
+      total_tasks: total,
+      success_rate: successRate,
+      avg_duration_ms: Math.round(avgDuration),
+      risk_distribution: riskDist,
+      risk_flags: flags,
+      verified_count: 0, // Legacy summaries have no on-chain verification
+      last_updated: new Date().toISOString(),
+    };
   }
 }

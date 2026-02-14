@@ -5,8 +5,9 @@ import {
   FLAG_HAS_VIOLATIONS,
   FLAG_LOW_RISK_ONLY,
   FLAG_RECENT_FAILURES,
+  FLAG_NO_VERIFIED_PROOFS,
 } from '../src/score/index.js';
-import type { ExecutionSummary } from '../src/score/index.js';
+import type { ExecutionSummary, OnChainProofRecord } from '../src/score/index.js';
 
 function makeSummary(overrides?: Partial<ExecutionSummary>): ExecutionSummary {
   return {
@@ -176,6 +177,101 @@ describe('score', () => {
         expect(report.agent_id).toBeTruthy();
         expect(report.trust_score).toBeGreaterThanOrEqual(0);
       }
+    });
+  });
+
+  // ─── On-Chain Proof Record Tests ─────────────────────────────
+
+  describe('on-chain proof records', () => {
+    function makeProofRecord(overrides?: Partial<OnChainProofRecord>): OnChainProofRecord {
+      return {
+        traceRoot: overrides?.traceRoot ?? `hash-${Math.random().toString(36).slice(2)}`,
+        txHash: overrides?.txHash ?? `tx-${Math.random().toString(36).slice(2)}`,
+        chain: overrides?.chain ?? 'solana',
+        executor: overrides?.executor ?? 'did:atel:agent1',
+        taskFrom: overrides?.taskFrom ?? 'did:atel:sender1',
+        action: overrides?.action ?? 'general',
+        success: overrides?.success ?? true,
+        durationMs: overrides?.durationMs ?? 150,
+        riskLevel: overrides?.riskLevel ?? 'low',
+        policyViolations: overrides?.policyViolations ?? 0,
+        proofId: overrides?.proofId ?? `proof-${Math.random().toString(36).slice(2)}`,
+        timestamp: overrides?.timestamp ?? new Date().toISOString(),
+        verified: overrides?.verified ?? false,
+      };
+    }
+
+    it('should accept proof records', () => {
+      const client = new TrustScoreClient();
+      expect(() => client.addProofRecord(makeProofRecord())).not.toThrow();
+    });
+
+    it('should throw on missing executor', () => {
+      const client = new TrustScoreClient();
+      expect(() => client.addProofRecord(makeProofRecord({ executor: '' }))).toThrow();
+    });
+
+    it('should throw on missing txHash', () => {
+      const client = new TrustScoreClient();
+      expect(() => client.addProofRecord(makeProofRecord({ txHash: '' }))).toThrow();
+    });
+
+    it('should deduplicate by txHash', () => {
+      const client = new TrustScoreClient();
+      const record = makeProofRecord({ txHash: 'same-tx' });
+      client.addProofRecord(record);
+      client.addProofRecord({ ...record }); // same txHash
+      const report = client.getAgentScore('did:atel:agent1');
+      expect(report.total_tasks).toBe(1);
+    });
+
+    it('should compute score from proof records', () => {
+      const client = new TrustScoreClient();
+      for (let i = 0; i < 5; i++) {
+        client.addProofRecord(makeProofRecord({ success: true }));
+      }
+      const report = client.getAgentScore('did:atel:agent1');
+      expect(report.trust_score).toBeGreaterThan(0);
+      expect(report.success_rate).toBe(1);
+      expect(report.total_tasks).toBe(5);
+    });
+
+    it('should prefer proof records over legacy summaries', () => {
+      const client = new TrustScoreClient();
+      // Add legacy summary (success)
+      client.submitExecutionSummary(makeSummary({ executor: 'did:atel:agent1', success: true }));
+      // Add proof records (all failures)
+      for (let i = 0; i < 5; i++) {
+        client.addProofRecord(makeProofRecord({ executor: 'did:atel:agent1', success: false }));
+      }
+      const report = client.getAgentScore('did:atel:agent1');
+      // Should use proof records (0% success), not legacy (100% success)
+      expect(report.success_rate).toBe(0);
+      expect(report.total_tasks).toBe(5);
+    });
+
+    it('should track verified_count', () => {
+      const client = new TrustScoreClient();
+      client.addProofRecord(makeProofRecord({ verified: true }));
+      client.addProofRecord(makeProofRecord({ verified: false }));
+      client.addProofRecord(makeProofRecord({ verified: true }));
+      const report = client.getAgentScore('did:atel:agent1');
+      expect(report.verified_count).toBe(2);
+    });
+
+    it('should flag NO_VERIFIED_PROOFS when none are verified', () => {
+      const client = new TrustScoreClient();
+      client.addProofRecord(makeProofRecord({ verified: false }));
+      const report = client.getAgentScore('did:atel:agent1');
+      expect(report.risk_flags).toContain(FLAG_NO_VERIFIED_PROOFS);
+    });
+
+    it('should include proof records in getAllScores', () => {
+      const client = new TrustScoreClient();
+      client.addProofRecord(makeProofRecord({ executor: 'did:atel:a' }));
+      client.submitExecutionSummary(makeSummary({ executor: 'did:atel:b' }));
+      const scores = client.getAllScores();
+      expect(scores.length).toBe(2);
     });
   });
 });
