@@ -60,6 +60,38 @@ function saveNetwork(n) { ensureDir(); writeFileSync(NETWORK_FILE, JSON.stringif
 function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACES_DIR, { recursive: true }); writeFileSync(resolve(TRACES_DIR, `${taskId}.jsonl`), trace.export()); }
 function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
 
+// Derive wallet addresses from env private keys
+async function getWalletAddresses() {
+  const wallets = {};
+  // Solana: base58 private key → public key
+  const solKey = process.env.ATEL_SOLANA_PRIVATE_KEY;
+  if (solKey) {
+    try {
+      const { Keypair } = await import('@solana/web3.js');
+      const bs58 = (await import('bs58')).default;
+      const kp = Keypair.fromSecretKey(bs58.decode(solKey));
+      wallets.solana = kp.publicKey.toBase58();
+    } catch {}
+  }
+  // Base: hex private key → address
+  const baseKey = process.env.ATEL_BASE_PRIVATE_KEY;
+  if (baseKey) {
+    try {
+      const { ethers } = await import('ethers');
+      wallets.base = new ethers.Wallet(baseKey).address;
+    } catch {}
+  }
+  // BSC: hex private key → address
+  const bscKey = process.env.ATEL_BSC_PRIVATE_KEY;
+  if (bscKey) {
+    try {
+      const { ethers } = await import('ethers');
+      wallets.bsc = new ethers.Wallet(bscKey).address;
+    } catch {}
+  }
+  return Object.keys(wallets).length > 0 ? wallets : undefined;
+}
+
 // ─── Unified Trust Score & Level System ──────────────────────────
 // Single source of truth: computeTrustScore() calculates score,
 // trustLevel is derived from score. No independent logic.
@@ -561,8 +593,9 @@ async function cmdStart(port) {
       const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
       const bestDirect = networkConfig.candidates.find(c => c.type !== 'relay') || networkConfig.candidates[0];
       const discoverable = policy.discoverable !== false;
-      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable }, id);
-      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable });
+      const wallets = await getWalletAddresses();
+      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable, wallets }, id);
+      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable, wallets: wallets ? Object.keys(wallets) : [] });
     } catch (e) { log({ event: 'auto_register_failed', error: e.message }); }
   }
 
@@ -907,17 +940,17 @@ async function cmdCheck(targetDid, riskLevel, options) {
 
   console.log(JSON.stringify({ event: 'checking_trust', did: targetDid, risk, mode: chainMode ? 'chain-verified' : 'local-only' }));
 
-  // 1. Get Registry info (reference only)
+  // 1. Get Registry info (reference only, includes wallets)
   let registryScore = null;
   let agentName = null;
-  let peerAnchorTxList = [];
+  let peerWallets = null;
   try {
     const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(targetDid)}`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       const d = await r.json();
       registryScore = d.trustScore;
       agentName = d.name;
-      if (d.anchorHistory) peerAnchorTxList = d.anchorHistory;
+      if (d.wallets) peerWallets = d.wallets;
     }
   } catch {}
 
@@ -927,23 +960,72 @@ async function cmdCheck(targetDid, riskLevel, options) {
   try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
   const agentHistory = history[targetDid] || { tasks: 0, successes: 0, failures: 0, lastSeen: null, proofs: [] };
 
-  // 3. Chain-verified mode: verify peer-provided anchor_tx on-chain
+  // 3. Chain-verified mode: query all three chains by wallet address
   let chainVerification = null;
-  if (chainMode && agentHistory.proofs.length > 0) {
+  if (chainMode) {
+    const chainResults = { solana: null, base: null, bsc: null, totalRecords: 0, matchingDid: 0 };
+
+    // 3a. Verify unverified local proofs on-chain
     const unverifiedProofs = agentHistory.proofs.filter(p => !p.verified && p.anchor_tx);
     if (unverifiedProofs.length > 0) {
-      console.log(JSON.stringify({ event: 'verifying_chain_proofs', count: unverifiedProofs.length }));
+      console.log(JSON.stringify({ event: 'verifying_local_proofs', count: unverifiedProofs.length }));
       const result = await verifyAnchorTxList(unverifiedProofs, targetDid);
-      chainVerification = result;
-      // Update local history with verified proofs
       for (const vp of result.proofs) {
         const existing = agentHistory.proofs.find(p => p.anchor_tx === vp.anchor_tx);
         if (existing) existing.verified = true;
       }
-      // Save updated history
       history[targetDid] = agentHistory;
       try { writeFileSync(localHistoryFile, JSON.stringify(history, null, 2)); } catch {}
     }
+
+    // 3b. Query peer's wallet addresses on all three chains
+    if (peerWallets) {
+      console.log(JSON.stringify({ event: 'querying_chain_history', wallets: peerWallets }));
+
+      // Solana
+      if (peerWallets.solana) {
+        try {
+          const rpcUrl = process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+          const provider = new SolanaAnchorProvider({ rpcUrl });
+          const records = await provider.queryByWallet(peerWallets.solana, { limit: 100, filterDid: targetDid });
+          chainResults.solana = { wallet: peerWallets.solana, records: records.length, asExecutor: records.filter(r => r.executorDid === targetDid).length, asRequester: records.filter(r => r.requesterDid === targetDid).length };
+          chainResults.totalRecords += records.length;
+          chainResults.matchingDid += records.length;
+        } catch (e) { chainResults.solana = { error: e.message }; }
+      }
+
+      // Base
+      if (peerWallets.base) {
+        try {
+          const { BaseAnchorProvider } = await import('@lawrenceliang-btc/atel-sdk');
+          const baseRpc = process.env.ATEL_BASE_RPC_URL || 'https://mainnet.base.org';
+          const provider = new BaseAnchorProvider({ rpcUrl: baseRpc });
+          const explorerApi = process.env.ATEL_BASE_EXPLORER_API || 'https://api.basescan.org/api';
+          const apiKey = process.env.ATEL_BASE_EXPLORER_KEY;
+          const records = await provider.queryByWallet(peerWallets.base, explorerApi, apiKey, { limit: 100, filterDid: targetDid });
+          chainResults.base = { wallet: peerWallets.base, records: records.length, asExecutor: records.filter(r => r.executorDid === targetDid).length, asRequester: records.filter(r => r.requesterDid === targetDid).length };
+          chainResults.totalRecords += records.length;
+          chainResults.matchingDid += records.length;
+        } catch (e) { chainResults.base = { error: e.message }; }
+      }
+
+      // BSC
+      if (peerWallets.bsc) {
+        try {
+          const { BSCAnchorProvider } = await import('@lawrenceliang-btc/atel-sdk');
+          const bscRpc = process.env.ATEL_BSC_RPC_URL || 'https://bsc-dataseed.binance.org';
+          const provider = new BSCAnchorProvider({ rpcUrl: bscRpc });
+          const explorerApi = process.env.ATEL_BSC_EXPLORER_API || 'https://api.bscscan.com/api';
+          const apiKey = process.env.ATEL_BSC_EXPLORER_KEY;
+          const records = await provider.queryByWallet(peerWallets.bsc, explorerApi, apiKey, { limit: 100, filterDid: targetDid });
+          chainResults.bsc = { wallet: peerWallets.bsc, records: records.length, asExecutor: records.filter(r => r.executorDid === targetDid).length, asRequester: records.filter(r => r.requesterDid === targetDid).length };
+          chainResults.totalRecords += records.length;
+          chainResults.matchingDid += records.length;
+        } catch (e) { chainResults.bsc = { error: e.message }; }
+      }
+    }
+
+    chainVerification = chainResults;
   }
 
   // 4. Compute unified trust score and level
@@ -1212,6 +1294,14 @@ Environment:
   ATEL_EXECUTOR_URL       Local executor HTTP endpoint
   ATEL_SOLANA_PRIVATE_KEY Solana key for on-chain anchoring
   ATEL_SOLANA_RPC_URL     Solana RPC (default: mainnet-beta)
+  ATEL_BASE_PRIVATE_KEY   Base chain key for on-chain anchoring
+  ATEL_BASE_RPC_URL       Base RPC (default: https://mainnet.base.org)
+  ATEL_BASE_EXPLORER_API  Basescan API URL
+  ATEL_BASE_EXPLORER_KEY  Basescan API key
+  ATEL_BSC_PRIVATE_KEY    BSC chain key for on-chain anchoring
+  ATEL_BSC_RPC_URL        BSC RPC (default: https://bsc-dataseed.binance.org)
+  ATEL_BSC_EXPLORER_API   BSCscan API URL
+  ATEL_BSC_EXPLORER_KEY   BSCscan API key
 
 Trust Policy: Configure .atel/policy.json trustPolicy for automatic
 pre-task trust evaluation. Use _risk in payload or --risk flag.`);

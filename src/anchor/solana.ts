@@ -285,4 +285,74 @@ export class SolanaAnchorProvider implements AnchorProvider {
       return false;
     }
   }
+
+  /**
+   * Query all ATEL anchor transactions for a given wallet address.
+   * Parses v2 structured memos to extract DID and task info.
+   *
+   * @param walletAddress - Solana wallet public key (base58)
+   * @param options - limit (default 100), filterDid (only return records involving this DID)
+   * @returns Array of parsed anchor memos with tx info
+   */
+  async queryByWallet(walletAddress: string, options?: { limit?: number; filterDid?: string }): Promise<Array<AnchorMemoV2 & { txHash: string; blockTime?: number }>> {
+    const limit = options?.limit ?? 100;
+    const pubkey = new PublicKey(walletAddress);
+    const results: Array<AnchorMemoV2 & { txHash: string; blockTime?: number }> = [];
+
+    try {
+      const signatures = await this.connection.getSignaturesForAddress(pubkey, { limit });
+
+      for (const sig of signatures) {
+        try {
+          const txInfo = await this.connection.getTransaction(sig.signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          });
+          if (!txInfo) continue;
+
+          // Search for ATEL memo in instructions
+          const message = txInfo.transaction.message;
+          for (let i = 0; i < message.compiledInstructions.length; i++) {
+            const ix = message.compiledInstructions[i];
+            const keys = message.getAccountKeys();
+            const programId = keys.get(ix.programIdIndex);
+            if (!programId?.equals(MEMO_PROGRAM_ID)) continue;
+
+            const memoText = Buffer.from(ix.data).toString('utf-8');
+            const parsed = SolanaAnchorProvider.decodeMemoV2(memoText);
+            if (!parsed) continue;
+
+            // Filter by DID if requested
+            if (options?.filterDid && parsed.executorDid !== options.filterDid && parsed.requesterDid !== options.filterDid) continue;
+
+            results.push({
+              ...parsed,
+              txHash: sig.signature,
+              blockTime: txInfo.blockTime ? txInfo.blockTime * 1000 : undefined,
+            });
+          }
+
+          // Fallback: check log messages
+          if (txInfo.meta?.logMessages) {
+            for (const log of txInfo.meta.logMessages) {
+              if (!log.includes(ANCHOR_V2_PREFIX)) continue;
+              const idx = log.indexOf(ANCHOR_V2_PREFIX);
+              const parsed = SolanaAnchorProvider.decodeMemoV2(log.slice(idx));
+              if (!parsed) continue;
+              if (options?.filterDid && parsed.executorDid !== options.filterDid && parsed.requesterDid !== options.filterDid) continue;
+              if (!results.some(r => r.txHash === sig.signature)) {
+                results.push({ ...parsed, txHash: sig.signature, blockTime: txInfo.blockTime ? txInfo.blockTime * 1000 : undefined });
+              }
+            }
+          }
+        } catch {
+          // Skip individual tx failures
+        }
+      }
+    } catch {
+      // Query failed — return empty
+    }
+
+    return results;
+  }
 }

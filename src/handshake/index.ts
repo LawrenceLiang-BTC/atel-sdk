@@ -35,6 +35,8 @@ export interface HandshakeInitPayload {
   encPublicKey: string; // X25519 encryption key, base64
   challenge: string;
   capabilities?: string[];
+  /** Wallet addresses for on-chain trust verification */
+  wallets?: { solana?: string; base?: string; bsc?: string };
 }
 
 /** Handshake ack payload */
@@ -45,6 +47,8 @@ export interface HandshakeAckPayload {
   challenge: string;
   challengeResponse: string; // sign(their_challenge, my_sk)
   capabilities?: string[];
+  /** Wallet addresses for on-chain trust verification */
+  wallets?: { solana?: string; base?: string; bsc?: string };
 }
 
 /** Handshake confirm payload */
@@ -66,6 +70,8 @@ export interface Session {
   encrypted: boolean;
   /** Remote agent's capabilities (if provided) */
   remoteCapabilities?: string[];
+  /** Remote agent's wallet addresses (if provided) */
+  remoteWallets?: { solana?: string; base?: string; bsc?: string };
   /** Session creation timestamp */
   createdAt: string;
   /** Session expiry timestamp */
@@ -126,7 +132,7 @@ export class HandshakeManager {
   /**
    * Create a handshake_init message (Step 1).
    */
-  createInit(remoteDid: string): ATELMessage<HandshakeInitPayload> {
+  createInit(remoteDid: string, wallets?: { solana?: string; base?: string; bsc?: string }): ATELMessage<HandshakeInitPayload> {
     const challenge = randomBytes(this.challengeBytes).toString('hex');
     this.pendingChallenges.set(remoteDid, challenge);
 
@@ -143,6 +149,7 @@ export class HandshakeManager {
         publicKey: Buffer.from(this.identity.publicKey).toString('base64'),
         encPublicKey: Buffer.from(encKeyPair.publicKey).toString('base64'),
         challenge,
+        wallets,
       },
       secretKey: this.identity.secretKey,
     });
@@ -206,7 +213,7 @@ export class HandshakeManager {
       secretKey: this.identity.secretKey,
     });
 
-    const session = this.createSession(payload.did, remotePubKey, encrypted, payload.capabilities);
+    const session = this.createSession(payload.did, remotePubKey, encrypted, payload.capabilities, payload.wallets);
 
     return { confirm, session };
   }
@@ -216,7 +223,7 @@ export class HandshakeManager {
   /**
    * Process a handshake_init message and create handshake_ack (Step 2).
    */
-  processInit(initMessage: ATELMessage<HandshakeInitPayload>): ATELMessage<HandshakeAckPayload> {
+  processInit(initMessage: ATELMessage<HandshakeInitPayload>, wallets?: { solana?: string; base?: string; bsc?: string }): ATELMessage<HandshakeAckPayload> {
     const payload = initMessage.payload;
 
     // Verify the init message signature
@@ -257,6 +264,7 @@ export class HandshakeManager {
         encPublicKey: Buffer.from(encKeyPair.publicKey).toString('base64'),
         challenge: ourChallenge,
         challengeResponse,
+        wallets,
       },
       secretKey: this.identity.secretKey,
     });
@@ -269,6 +277,7 @@ export class HandshakeManager {
     confirmMessage: ATELMessage<HandshakeConfirmPayload>,
     initiatorPublicKey: Uint8Array,
     initiatorCapabilities?: string[],
+    initiatorWallets?: { solana?: string; base?: string; bsc?: string },
   ): Session {
     const payload = confirmMessage.payload;
 
@@ -289,7 +298,7 @@ export class HandshakeManager {
     this.pendingChallenges.delete(confirmMessage.from);
 
     const encrypted = this.encryption.hasSession(confirmMessage.from);
-    return this.createSession(confirmMessage.from, initiatorPublicKey, encrypted, initiatorCapabilities);
+    return this.createSession(confirmMessage.from, initiatorPublicKey, encrypted, initiatorCapabilities, initiatorWallets);
   }
 
   // ── Session Management ───────────────────────────────────────
@@ -339,6 +348,7 @@ export class HandshakeManager {
     remotePublicKey: Uint8Array,
     encrypted: boolean,
     remoteCapabilities?: string[],
+    remoteWallets?: { solana?: string; base?: string; bsc?: string },
   ): Session {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.sessionTtlSec * 1000);
@@ -350,6 +360,7 @@ export class HandshakeManager {
       remotePublicKey,
       encrypted,
       remoteCapabilities,
+      remoteWallets,
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       state: 'active',

@@ -30,10 +30,22 @@ export interface EvmAnchorConfig {
 }
 
 /**
- * Prefix prepended to the hash in the transaction data field
+ * Prefix prepended to the hash in the transaction data field (legacy)
  * so anchored transactions are easily identifiable.
  */
 const ANCHOR_PREFIX = 'ATEL_ANCHOR:';
+
+/** V2 structured format: ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root> */
+const ANCHOR_V2_PREFIX = 'ATEL:1:';
+
+/** Structured anchor metadata for v2 */
+export interface EvmAnchorMemoV2 {
+  version: 1;
+  executorDid: string;
+  requesterDid: string;
+  taskId: string;
+  traceRoot: string;
+}
 
 /**
  * Abstract EVM anchor provider.
@@ -67,25 +79,53 @@ export class EvmAnchorProvider implements AnchorProvider {
 
   /**
    * Encode a hash string into the hex data payload for a transaction.
-   *
-   * Format: `0x` + hex(ATEL_ANCHOR:<hash>)
+   * Uses v2 structured format if metadata provided, legacy otherwise.
    */
-  static encodeData(hash: string): string {
+  static encodeData(hash: string, meta?: { executorDid?: string; requesterDid?: string; taskId?: string }): string {
+    if (meta?.executorDid && meta?.requesterDid && meta?.taskId) {
+      return ethers.hexlify(ethers.toUtf8Bytes(`${ANCHOR_V2_PREFIX}${meta.executorDid}:${meta.requesterDid}:${meta.taskId}:${hash}`));
+    }
     return ethers.hexlify(ethers.toUtf8Bytes(`${ANCHOR_PREFIX}${hash}`));
   }
 
   /**
-   * Decode the hash from a transaction data field.
+   * Decode the hash from a transaction data field. Supports v2 and legacy.
    *
    * @returns The decoded hash, or `null` if the data doesn't match the expected format.
    */
   static decodeData(data: string): string | null {
     try {
       const text = ethers.toUtf8String(data);
+      if (text.startsWith(ANCHOR_V2_PREFIX)) {
+        const parts = text.slice(ANCHOR_V2_PREFIX.length).split(':');
+        if (parts.length >= 4) return parts[parts.length - 1];
+      }
       if (text.startsWith(ANCHOR_PREFIX)) {
         return text.slice(ANCHOR_PREFIX.length);
       }
       return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Decode full structured data (v2 only).
+   * Returns null for legacy format.
+   */
+  static decodeDataV2(data: string): EvmAnchorMemoV2 | null {
+    try {
+      const text = ethers.toUtf8String(data);
+      if (!text.startsWith(ANCHOR_V2_PREFIX)) return null;
+      const rest = text.slice(ANCHOR_V2_PREFIX.length);
+      const parts = rest.split(':');
+      if (parts.length < 10) return null;
+      const executorDid = parts.slice(0, 4).join(':');
+      const requesterDid = parts.slice(4, 8).join(':');
+      const taskId = parts[8];
+      const traceRoot = parts.slice(9).join(':');
+      if (!executorDid.startsWith('did:atel:') || !requesterDid.startsWith('did:atel:')) return null;
+      return { version: 1, executorDid, requesterDid, taskId, traceRoot };
     } catch {
       return null;
     }
@@ -97,7 +137,7 @@ export class EvmAnchorProvider implements AnchorProvider {
       throw new Error(`${this.name}: Cannot anchor without a private key`);
     }
 
-    const data = EvmAnchorProvider.encodeData(hash);
+    const data = EvmAnchorProvider.encodeData(hash, metadata as any);
 
     try {
       const tx = await this.wallet.sendTransaction({
@@ -201,5 +241,62 @@ export class EvmAnchorProvider implements AnchorProvider {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Query ATEL anchor transactions for a wallet address using Etherscan-compatible API.
+   *
+   * @param walletAddress - EVM wallet address (0x...)
+   * @param explorerApiUrl - Etherscan/Basescan/BSCscan API base URL
+   * @param apiKey - Explorer API key (optional, rate-limited without)
+   * @param options - limit, filterDid
+   * @returns Array of parsed v2 anchor records
+   */
+  async queryByWallet(
+    walletAddress: string,
+    explorerApiUrl: string,
+    apiKey?: string,
+    options?: { limit?: number; filterDid?: string },
+  ): Promise<Array<EvmAnchorMemoV2 & { txHash: string; blockTime?: number }>> {
+    const results: Array<EvmAnchorMemoV2 & { txHash: string; blockTime?: number }> = [];
+    const limit = options?.limit ?? 100;
+
+    try {
+      // Query normal transactions from this address
+      let url = `${explorerApiUrl}?module=account&action=txlist&address=${walletAddress}&sort=desc&page=1&offset=${limit}`;
+      if (apiKey) url += `&apikey=${apiKey}`;
+
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const data = await resp.json() as any;
+      if (data.status !== '1' || !Array.isArray(data.result)) return results;
+
+      for (const tx of data.result) {
+        // Only self-transactions (to === from) with data
+        if (!tx.input || tx.input === '0x') continue;
+        if (tx.from?.toLowerCase() !== walletAddress.toLowerCase()) continue;
+
+        try {
+          const text = ethers.toUtf8String(tx.input);
+          if (!text.startsWith(ANCHOR_V2_PREFIX)) continue;
+
+          const parsed = EvmAnchorProvider.decodeDataV2(tx.input);
+          if (!parsed) continue;
+
+          if (options?.filterDid && parsed.executorDid !== options.filterDid && parsed.requesterDid !== options.filterDid) continue;
+
+          results.push({
+            ...parsed,
+            txHash: tx.hash,
+            blockTime: tx.timeStamp ? parseInt(tx.timeStamp) * 1000 : undefined,
+          });
+        } catch {
+          // Not UTF-8 decodable, skip
+        }
+      }
+    } catch {
+      // Query failed
+    }
+
+    return results;
   }
 }
