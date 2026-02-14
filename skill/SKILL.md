@@ -101,13 +101,102 @@ When using a DID as target, the CLI automatically:
 
 When `atel start` is running, incoming tasks flow through:
 
-1. **Security policy check** — DID blacklist/whitelist, rate limit, payload size, concurrency
-2. **Capability boundary check** — is the action within registered capabilities?
-3. **Accept** — return `{status: "accepted", taskId}` immediately
-4. **Forward** — send to executor service (`ATEL_EXECUTOR_URL`)
-5. **Execute** — executor processes and calls back with result
-6. **Prove** — generate Trace + Proof, anchor on Solana mainnet
-7. **Return** — encrypt result and push back to sender's endpoint
+1. **Nonce anti-replay** — duplicate nonce rejected (if provided)
+2. **Content security audit** — SQL/NoSQL injection, path traversal, command injection, credential access detection
+3. **Security policy check** — DID blacklist/whitelist, rate limit, payload size, concurrency
+4. **Capability boundary check** — is the action within registered capabilities?
+5. **Accept** — return `{status: "accepted", taskId}` immediately
+6. **Forward** — send to executor service (`ATEL_EXECUTOR_URL`)
+7. **Execute** — executor processes and calls back with result
+8. **Rollback** — if execution fails, LIFO rollback of side effects
+9. **Prove** — generate Trace + Proof, anchor on Solana mainnet (success only)
+10. **Trust Score** — update local score from on-chain proof, push to Registry
+11. **Return** — encrypt result and push back to sender's endpoint
+
+### Rejection Handling
+
+Every rejection generates a local Trace + Proof (not on-chain). The rejection proof is returned to the sender so they can verify the rejection was legitimate.
+
+**Rejection response format:**
+```json
+{
+  "status": "rejected",
+  "error": "reason for rejection",
+  "proof": {
+    "proof_id": "uuid",
+    "trace_root": "sha256-hash"
+  }
+}
+```
+
+**Rejection types:**
+| Stage | Trace Event | Trigger |
+|-------|-------------|---------|
+| Replay | `REPLAY_REJECTED` | Duplicate nonce |
+| Content audit | `CONTENT_AUDIT_FAILED` | Malicious payload detected |
+| Policy | `POLICY_VIOLATION` | Rate limit, blacklist, payload too large |
+| Capability | `CAPABILITY_REJECTED` | Action outside registered capabilities |
+
+### Nonce Anti-Replay
+
+To prevent replay attacks, include a unique `nonce` in your task payload:
+
+```bash
+atel task "did:atel:xxxxx" '{"action":"translation","text":"Hello","target_lang":"zh","nonce":"unique-random-string-12345"}'
+```
+
+The receiving agent tracks used nonces. If the same nonce is sent twice, the task is rejected with `REPLAY_REJECTED` proof.
+
+### Task Result Format
+
+When a task completes (success or failure), the result pushed back includes:
+
+```json
+{
+  "taskId": "task-xxx",
+  "status": "completed",
+  "result": { "...actual result..." },
+  "proof": {
+    "proof_id": "uuid",
+    "trace_root": "sha256-hash",
+    "events_count": 8
+  },
+  "anchor": {
+    "chain": "solana",
+    "txHash": "base58-tx-hash"
+  },
+  "execution": {
+    "duration_ms": 3200,
+    "encrypted": true
+  },
+  "rollback": null
+}
+```
+
+**On failure with rollback:**
+```json
+{
+  "taskId": "task-xxx",
+  "status": "failed",
+  "result": { "error": "reason" },
+  "proof": { "proof_id": "...", "trace_root": "..." },
+  "anchor": { "chain": "solana", "txHash": "..." },
+  "rollback": {
+    "total": 2,
+    "succeeded": 2,
+    "failed": 0
+  }
+}
+```
+
+### Verifying Proofs
+
+To verify a task result is authentic:
+1. Check `proof.trace_root` — this is the Merkle root of the execution trace
+2. If `anchor.txHash` exists, verify on Solana: the tx memo should contain the trace_root
+3. The proof is signed by the executor's Ed25519 key (derived from their DID)
+
+Without `anchor`, the proof is self-attested (local only). With `anchor`, it's independently verifiable on-chain.
 
 If no executor is configured, tasks complete in **echo mode** (returns received payload as-is).
 
