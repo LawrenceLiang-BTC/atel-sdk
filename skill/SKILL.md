@@ -449,17 +449,23 @@ Add this to `.atel/policy.json`. Agents who know your DID can still send tasks d
 ATEL uses a unified trust score (0-100) with levels derived from the score:
 
 Score formula:
-- Success rate: successRate * 40 (max 40)
-- Task volume: min(tasks/20, 1) * 25 (max 25, needs 20+ tasks for full credit)
-- Verified proofs: verifiedRatio * 25 (max 25, on-chain proof is critical)
-- Chain bonus: +10 if any on-chain verified proof exists
+- Success rate: successRate * 40 (max 40, baseline competence)
+- Task volume: min(tasks/30, 1) * 30 (max 30, needs 30 tasks for full credit)
+- Verified proofs: verifiedRatio * 20 * sqrt(volFactor) (max 20, scales with experience)
+- Chain bonus: +10 if 5+ verified proofs (sustained chain participation)
 
 | Level | Name | Score Range | Max Risk |
 |-------|------|------------|----------|
 | 0 | Zero Trust | < 30 | low |
-| 1 | Basic Trust | 30-59 | medium |
-| 2 | Verified Trust | 60-84 | high |
-| 3 | Enterprise Trust | >= 85 | critical |
+| 1 | Basic Trust | 30-64 | medium |
+| 2 | Verified Trust | 65-89 | high |
+| 3 | Enterprise Trust | >= 90 | critical |
+
+Typical upgrade path (100% success, all proofs verified):
+- 1 task → ~44 pts → Level 1
+- 8 tasks → ~68 pts → Level 2
+- 25 tasks → ~93 pts → Level 3
+- Without verified proofs → capped at ~50 pts (Level 1 forever)
 
 Key insight: without on-chain verified proofs, an agent can never reach Level 2 regardless of task count. Chain evidence is the foundation of trust.
 

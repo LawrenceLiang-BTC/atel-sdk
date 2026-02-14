@@ -71,32 +71,37 @@ function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); i
 //     Active, can assess agents never interacted with. Requires RPC access.
 //
 // Score formula (0-100):
-//   - Success rate:    successRate * 40  (max 40)
-//   - Task volume:     min(tasks/20, 1) * 25  (max 25, needs 20+ tasks for full credit)
-//   - Verified proofs: verifiedRatio * 25  (max 25, on-chain proof is critical)
-//   - Chain bonus:     +10 if has on-chain verified history (capped at 100)
+//   - Success rate:    successRate * 40  (max 40, baseline competence)
+//   - Task volume:     min(tasks/30, 1) * 30  (max 30, needs 30 tasks for full credit)
+//   - Verified proofs: verifiedRatio * 20 * sqrt(volFactor)  (max 20, scales with experience)
+//   - Chain bonus:     +10 if 5+ verified proofs (sustained chain participation)
 //
 // Level mapping (derived from score):
 //   Level 0 (zero_trust):       score < 30   → max risk: low
-//   Level 1 (basic_trust):      score 30-59  → max risk: medium
-//   Level 2 (verified_trust):   score 60-84  → max risk: high
-//   Level 3 (enterprise_trust): score >= 85  → max risk: critical
+//   Level 1 (basic_trust):      score 30-64  → max risk: medium
+//   Level 2 (verified_trust):   score 65-89  → max risk: high
+//   Level 3 (enterprise_trust): score >= 90  → max risk: critical
+//
+// Upgrade path (best case, 100% success + all verified):
+//   1 task  → 44 pts → L1    |  8 tasks → 68 pts → L2
+//   25 tasks → 93 pts → L3   |  No proofs → capped at ~50 pts (L1)
 
 function computeTrustScore(agentHistory) {
   if (!agentHistory || agentHistory.tasks === 0) return 0;
   const successRate = agentHistory.successes / agentHistory.tasks;
-  const volumeScore = Math.min(agentHistory.tasks / 20, 1) * 25;
+  const volFactor = Math.min(agentHistory.tasks / 30, 1);
   const successScore = successRate * 40;
+  const volumeScore = volFactor * 30;
   const verifiedProofs = agentHistory.proofs ? agentHistory.proofs.filter(p => p.verified).length : 0;
   const verifiedRatio = agentHistory.proofs?.length > 0 ? verifiedProofs / agentHistory.proofs.length : 0;
-  const proofScore = verifiedRatio * 25;
-  const chainBonus = verifiedProofs > 0 ? 10 : 0;
-  return Math.min(100, Math.round((volumeScore + successScore + proofScore + chainBonus) * 100) / 100);
+  const proofScore = verifiedRatio * 20 * Math.sqrt(volFactor);
+  const chainBonus = verifiedProofs >= 5 ? 10 : 0;
+  return Math.min(100, Math.round((successScore + volumeScore + proofScore + chainBonus) * 100) / 100);
 }
 
 function computeTrustLevel(score) {
-  if (score >= 85) return { level: 3, name: 'enterprise_trust', maxRisk: 'critical' };
-  if (score >= 60) return { level: 2, name: 'verified_trust', maxRisk: 'high' };
+  if (score >= 90) return { level: 3, name: 'enterprise_trust', maxRisk: 'critical' };
+  if (score >= 65) return { level: 2, name: 'verified_trust', maxRisk: 'high' };
   if (score >= 30) return { level: 1, name: 'basic_trust', maxRisk: 'medium' };
   return { level: 0, name: 'zero_trust', maxRisk: 'low' };
 }
