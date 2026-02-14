@@ -277,5 +277,5 @@ export class AnchorManager {
 export { EvmAnchorProvider, type EvmAnchorConfig } from './evm.js';
 export { BaseAnchorProvider } from './base.js';
 export { BSCAnchorProvider } from './bsc.js';
-export { SolanaAnchorProvider, type SolanaAnchorConfig } from './solana.js';
+export { SolanaAnchorProvider, type SolanaAnchorConfig, type AnchorMemoV2 } from './solana.js';
 export { MockAnchorProvider } from './mock.js';

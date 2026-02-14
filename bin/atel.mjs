@@ -64,11 +64,17 @@ function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); i
 // Single source of truth: computeTrustScore() calculates score,
 // trustLevel is derived from score. No independent logic.
 //
+// DUAL MODE:
+//   - Local mode (default): Only uses local trust-history.json
+//     Passive, only knows about direct interactions. Fast, no network.
+//   - Chain-verified mode: Verifies anchor_tx on-chain + accepts peer-provided proofs
+//     Active, can assess agents never interacted with. Requires RPC access.
+//
 // Score formula (0-100):
 //   - Success rate:    successRate * 40  (max 40)
 //   - Task volume:     min(tasks/20, 1) * 25  (max 25, needs 20+ tasks for full credit)
 //   - Verified proofs: verifiedRatio * 25  (max 25, on-chain proof is critical)
-//   - Chain bonus:     +10 if has on-chain history (capped at 100)
+//   - Chain bonus:     +10 if has on-chain verified history (capped at 100)
 //
 // Level mapping (derived from score):
 //   Level 0 (zero_trust):       score < 30   → max risk: low
@@ -97,6 +103,25 @@ function computeTrustLevel(score) {
 
 const RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
 function riskAllowed(maxRisk, requestedRisk) { return (RISK_ORDER[requestedRisk] || 0) <= (RISK_ORDER[maxRisk] || 0); }
+
+// Verify anchor_tx list on-chain, return count of valid proofs
+async function verifyAnchorTxList(anchorTxList, targetDid) {
+  if (!anchorTxList || anchorTxList.length === 0) return { verified: 0, total: 0, proofs: [] };
+  const rpcUrl = process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+  const provider = new SolanaAnchorProvider({ rpcUrl });
+  let verified = 0;
+  const proofs = [];
+  for (const tx of anchorTxList) {
+    try {
+      const result = await provider.verify(tx.trace_root || '', tx.txHash || tx.anchor_tx || '');
+      if (result.valid) {
+        verified++;
+        proofs.push({ proof_id: tx.proof_id || tx.txHash, trace_root: tx.trace_root, verified: true, anchor_tx: tx.txHash || tx.anchor_tx, timestamp: new Date().toISOString() });
+      }
+    } catch {}
+  }
+  return { verified, total: anchorTxList.length, proofs };
+}
 
 // Unified trust check — single function used by all code paths
 function checkTrust(remoteDid, risk, policy, force) {
@@ -158,7 +183,13 @@ async function anchorOnChain(traceRoot, metadata) {
   if (!key) return null;
   try {
     const s = new SolanaAnchorProvider({ rpcUrl: process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', privateKey: key });
-    const r = await s.anchor(traceRoot, metadata);
+    // Pass DID info for v2 structured memo: ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root>
+    const r = await s.anchor(traceRoot, {
+      executorDid: metadata?.executorDid,
+      requesterDid: metadata?.requesterDid || metadata?.task_from,
+      taskId: metadata?.taskId,
+      ...metadata,
+    });
     log({ event: 'proof_anchored', chain: 'solana', txHash: r.txHash, block: r.blockNumber, trace_root: traceRoot });
     return r;
   } catch (e) { log({ event: 'anchor_failed', chain: 'solana', error: e.message }); return null; }
@@ -312,7 +343,7 @@ async function cmdStart(port) {
     const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `task-from-${task.from}`, JSON.stringify(result));
 
     // ── On-chain Anchoring ──
-    const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, task_from: task.from, action: task.action, taskId });
+    const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid: task.from, taskId, action: task.action });
 
     // ── Trust Score Update ──
     try {
@@ -863,19 +894,26 @@ async function cmdResult(taskId, resultJson) {
 
 // ─── Trust Verification Commands ─────────────────────────────────
 
-async function cmdCheck(targetDid, riskLevel) {
+async function cmdCheck(targetDid, riskLevel, options) {
   const risk = riskLevel || 'low';
+  const chainMode = options?.chain || !!process.env.ATEL_SOLANA_RPC_URL;
   const policy = loadPolicy();
   const tp = policy.trustPolicy || DEFAULT_POLICY.trustPolicy;
 
-  console.log(JSON.stringify({ event: 'checking_trust', did: targetDid, risk }));
+  console.log(JSON.stringify({ event: 'checking_trust', did: targetDid, risk, mode: chainMode ? 'chain-verified' : 'local-only' }));
 
   // 1. Get Registry info (reference only)
   let registryScore = null;
   let agentName = null;
+  let peerAnchorTxList = [];
   try {
     const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(targetDid)}`, { signal: AbortSignal.timeout(5000) });
-    if (r.ok) { const d = await r.json(); registryScore = d.trustScore; agentName = d.name; }
+    if (r.ok) {
+      const d = await r.json();
+      registryScore = d.trustScore;
+      agentName = d.name;
+      if (d.anchorHistory) peerAnchorTxList = d.anchorHistory;
+    }
   } catch {}
 
   // 2. Local interaction history
@@ -884,11 +922,30 @@ async function cmdCheck(targetDid, riskLevel) {
   try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
   const agentHistory = history[targetDid] || { tasks: 0, successes: 0, failures: 0, lastSeen: null, proofs: [] };
 
-  // 3. Compute unified trust score and level
+  // 3. Chain-verified mode: verify peer-provided anchor_tx on-chain
+  let chainVerification = null;
+  if (chainMode && agentHistory.proofs.length > 0) {
+    const unverifiedProofs = agentHistory.proofs.filter(p => !p.verified && p.anchor_tx);
+    if (unverifiedProofs.length > 0) {
+      console.log(JSON.stringify({ event: 'verifying_chain_proofs', count: unverifiedProofs.length }));
+      const result = await verifyAnchorTxList(unverifiedProofs, targetDid);
+      chainVerification = result;
+      // Update local history with verified proofs
+      for (const vp of result.proofs) {
+        const existing = agentHistory.proofs.find(p => p.anchor_tx === vp.anchor_tx);
+        if (existing) existing.verified = true;
+      }
+      // Save updated history
+      history[targetDid] = agentHistory;
+      try { writeFileSync(localHistoryFile, JSON.stringify(history, null, 2)); } catch {}
+    }
+  }
+
+  // 4. Compute unified trust score and level
   const computedScore = computeTrustScore(agentHistory);
   const trustLevel = computeTrustLevel(computedScore);
 
-  // 4. Apply trust policy (unified)
+  // 5. Apply trust policy
   const threshold = tp.riskThresholds?.[risk] ?? 0;
   const effectiveScore = computedScore > 0 ? computedScore : (registryScore || 0);
   const isNewAgent = agentHistory.tasks === 0;
@@ -910,9 +967,10 @@ async function cmdCheck(targetDid, riskLevel) {
     reason = `Score ${effectiveScore} meets threshold ${threshold} for ${risk} risk`;
   }
 
-  console.log(JSON.stringify({
+  const output = {
     did: targetDid,
     name: agentName,
+    mode: chainMode ? 'chain-verified' : 'local-only',
     trust: {
       computed_score: computedScore,
       registry_score: registryScore,
@@ -927,7 +985,11 @@ async function cmdCheck(targetDid, riskLevel) {
       total_proofs: agentHistory.proofs.length,
     },
     policy: { risk, threshold, decision, reason },
-  }, null, 2));
+  };
+  if (chainVerification) output.chain_verification = chainVerification;
+  if (!chainMode) output.note = 'Local-only mode: score based on direct interaction history only. Set ATEL_SOLANA_RPC_URL or use --chain for on-chain verification.';
+
+  console.log(JSON.stringify(output, null, 2));
 }
 
 async function cmdVerifyProof(anchorTx, traceRoot) {
@@ -1097,7 +1159,8 @@ async function cmdRotate() {
 
 // ─── Main ────────────────────────────────────────────────────────
 
-const [,, cmd, ...args] = process.argv;
+const [,, cmd, ...rawArgs] = process.argv;
+const args = rawArgs.filter(a => !a.startsWith('--'));
 const commands = {
   init: () => cmdInit(args[0]),
   info: () => cmdInfo(),
@@ -1110,7 +1173,7 @@ const commands = {
   handshake: () => cmdHandshake(args[0], args[1]),
   task: () => cmdTask(args[0], args[1]),
   result: () => cmdResult(args[0], args[1]),
-  check: () => cmdCheck(args[0], args[1]),
+  check: () => cmdCheck(args[0], args[1], { chain: rawArgs.includes('--chain') }),
   'verify-proof': () => cmdVerifyProof(args[0], args[1]),
   audit: () => cmdAudit(args[0], args[1]),
   rotate: () => cmdRotate(),

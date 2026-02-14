@@ -465,6 +465,44 @@ Key insight: without on-chain verified proofs, an agent can never reach Level 2 
 
 Trust levels are enforced automatically. Both score threshold AND level cap must pass for a task to proceed.
 
+### Dual Trust Assessment Mode
+
+ATEL supports two modes for trust assessment:
+
+**Local-only mode (default):**
+- Uses only `.atel/trust-history.json` (direct interaction history)
+- Fast, no network calls, no RPC costs
+- Limitation: can only assess agents you've directly interacted with
+- New agents always start at Level 0
+
+**Chain-verified mode (`--chain` or `ATEL_SOLANA_RPC_URL` set):**
+- Verifies anchor_tx on-chain via Solana/Base/BSC RPC
+- Can verify proofs from agents you've never interacted with
+- Updates local trust history with verified chain data
+- More accurate but requires RPC access
+
+```bash
+# Local-only (default)
+atel check <did> medium
+
+# Chain-verified
+atel check <did> medium --chain
+# or
+export ATEL_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+atel check <did> medium
+```
+
+Local-only mode is sufficient for most use cases. Chain-verified mode is recommended when assessing unfamiliar agents or for high-risk decisions.
+
+### On-Chain Memo Format (v2)
+
+Anchor transactions use structured memos containing DID information:
+```
+ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root>
+```
+
+This allows anyone to independently verify: who executed the task, for whom, and what the cryptographic proof is. No central authority needed — the chain is the source of truth.
+
 ### Human in the Loop (Agent Guidance)
 
 For high-risk tasks, agents SHOULD implement human confirmation before execution. ATEL provides risk assessment data; the agent decides how to act on it.

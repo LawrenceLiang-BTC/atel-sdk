@@ -39,8 +39,20 @@ export interface SolanaAnchorConfig {
 /** Solana Memo Program address */
 const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 
-/** Prefix prepended to the hash in the memo */
+/** Prefix prepended to the hash in the memo (legacy format) */
 const ANCHOR_PREFIX = 'ATEL_ANCHOR:';
+
+/** V2 structured memo format: ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root> */
+const ANCHOR_V2_PREFIX = 'ATEL:1:';
+
+/** Structured anchor metadata for v2 memo */
+export interface AnchorMemoV2 {
+  version: 1;
+  executorDid: string;
+  requesterDid: string;
+  taskId: string;
+  traceRoot: string;
+}
 
 /**
  * Anchor provider for the Solana blockchain.
@@ -75,23 +87,56 @@ export class SolanaAnchorProvider implements AnchorProvider {
   }
 
   /**
-   * Encode a hash into the memo data buffer.
+   * Encode a hash into the memo data buffer (v2 structured format).
+   * Falls back to legacy format if no metadata provided.
    */
-  static encodeMemo(hash: string): Buffer {
+  static encodeMemo(hash: string, meta?: { executorDid?: string; requesterDid?: string; taskId?: string }): Buffer {
+    if (meta?.executorDid && meta?.requesterDid && meta?.taskId) {
+      return Buffer.from(`${ANCHOR_V2_PREFIX}${meta.executorDid}:${meta.requesterDid}:${meta.taskId}:${hash}`, 'utf-8');
+    }
     return Buffer.from(`${ANCHOR_PREFIX}${hash}`, 'utf-8');
   }
 
   /**
-   * Decode a hash from memo data.
+   * Decode a hash from memo data. Supports both v2 structured and legacy format.
    *
    * @returns The decoded hash, or `null` if the data doesn't match.
    */
   static decodeMemo(data: Buffer | Uint8Array | string): string | null {
     const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf-8');
+    // V2 structured format
+    if (text.startsWith(ANCHOR_V2_PREFIX)) {
+      const parts = text.slice(ANCHOR_V2_PREFIX.length).split(':');
+      if (parts.length >= 4) return parts[parts.length - 1]; // last part is trace_root
+    }
+    // Legacy format
     if (text.startsWith(ANCHOR_PREFIX)) {
       return text.slice(ANCHOR_PREFIX.length);
     }
     return null;
+  }
+
+  /**
+   * Decode full structured memo (v2 only).
+   * Returns null for legacy format memos.
+   */
+  static decodeMemoV2(data: Buffer | Uint8Array | string): AnchorMemoV2 | null {
+    const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf-8');
+    if (!text.startsWith(ANCHOR_V2_PREFIX)) return null;
+    const rest = text.slice(ANCHOR_V2_PREFIX.length);
+    // Format: executorDID:requesterDID:taskId:traceRoot
+    // DIDs contain colons (did:atel:ed25519:xxx), so we need smart parsing
+    // Split by ':' and reconstruct DIDs
+    const parts = rest.split(':');
+    // Minimum: did:atel:ed25519:key : did:atel:ed25519:key : taskId : traceRoot = 4+4+1+1 = 10 parts
+    if (parts.length < 10) return null;
+    // Each DID is 4 parts: did:atel:ed25519:base58
+    const executorDid = parts.slice(0, 4).join(':');
+    const requesterDid = parts.slice(4, 8).join(':');
+    const taskId = parts[8];
+    const traceRoot = parts.slice(9).join(':');
+    if (!executorDid.startsWith('did:atel:') || !requesterDid.startsWith('did:atel:')) return null;
+    return { version: 1, executorDid, requesterDid, taskId, traceRoot };
   }
 
   /** @inheritdoc */
@@ -100,7 +145,7 @@ export class SolanaAnchorProvider implements AnchorProvider {
       throw new Error('Solana: Cannot anchor without a private key');
     }
 
-    const memoData = SolanaAnchorProvider.encodeMemo(hash);
+    const memoData = SolanaAnchorProvider.encodeMemo(hash, metadata as any);
 
     const instruction = new TransactionInstruction({
       keys: [{ pubkey: this.keypair.publicKey, isSigner: true, isWritable: true }],
