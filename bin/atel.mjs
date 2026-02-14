@@ -484,12 +484,14 @@ async function cmdStart(port) {
         for (const req of requests) {
           // Forward to local endpoint
           try {
-            const localResp = await fetch(`http://127.0.0.1:${p}${req.path}`, {
-              method: req.method || 'POST',
+            const method = req.method || 'POST';
+            const fetchOpts = {
+              method,
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(req.body),
               signal: AbortSignal.timeout(30000),
-            });
+            };
+            if (method !== 'GET' && method !== 'HEAD') fetchOpts.body = JSON.stringify(req.body);
+            const localResp = await fetch(`http://127.0.0.1:${p}${req.path}`, fetchOpts);
             const body = await localResp.json();
             // Send response back to relay
             await fetch(`${relayUrl}/relay/v1/respond`, {
@@ -892,8 +894,11 @@ async function cmdVerifyProof(anchorTx, traceRoot) {
 async function cmdAudit(targetDidOrUrl, taskId) {
   if (!targetDidOrUrl || !taskId) { console.error('Usage: atel audit <did_or_endpoint> <taskId>'); process.exit(1); }
 
+  const id = requireIdentity();
+
   // Resolve endpoint
   let endpoint = targetDidOrUrl;
+  let connectionType = 'direct';
   if (targetDidOrUrl.startsWith('did:')) {
     try {
       const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(targetDidOrUrl)}`, { signal: AbortSignal.timeout(5000) });
@@ -901,7 +906,7 @@ async function cmdAudit(targetDidOrUrl, taskId) {
         const d = await r.json();
         if (d.candidates && d.candidates.length > 0) {
           const conn = await connectToAgent(d.candidates, targetDidOrUrl);
-          if (conn) endpoint = conn.url;
+          if (conn) { endpoint = conn.url; connectionType = conn.candidateType; }
         }
         if (endpoint === targetDidOrUrl && d.endpoint) endpoint = d.endpoint;
       }
@@ -910,14 +915,26 @@ async function cmdAudit(targetDidOrUrl, taskId) {
 
   if (endpoint.startsWith('did:')) { console.error('Could not resolve endpoint for DID'); process.exit(1); }
 
-  console.log(JSON.stringify({ event: 'auditing', target: endpoint, taskId }));
+  console.log(JSON.stringify({ event: 'auditing', target: endpoint, taskId, via: connectionType }));
 
   try {
-    // Fetch trace from target
-    const traceUrl = endpoint.replace(/\/$/, '') + `/atel/v1/trace/${taskId}`;
-    const resp = await fetch(traceUrl, { signal: AbortSignal.timeout(10000) });
-    if (!resp.ok) { console.log(JSON.stringify({ audit: 'failed', error: `Trace fetch failed: ${resp.status}` })); return; }
-    const traceData = await resp.json();
+    let traceData;
+    if (connectionType === 'relay') {
+      // Relay mode: send GET-like request through relay
+      const resp = await fetch(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'GET', path: `/atel/v1/trace/${taskId}`, from: id.did }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!resp.ok) { console.log(JSON.stringify({ audit: 'failed', error: `Relay trace fetch failed: ${resp.status}` })); return; }
+      traceData = await resp.json();
+    } else {
+      // Direct mode
+      const traceUrl = endpoint.replace(/\/$/, '') + `/atel/v1/trace/${taskId}`;
+      const resp = await fetch(traceUrl, { signal: AbortSignal.timeout(10000) });
+      if (!resp.ok) { console.log(JSON.stringify({ audit: 'failed', error: `Trace fetch failed: ${resp.status}` })); return; }
+      traceData = await resp.json();
+    }
 
     // Verify hash chain
     const events = traceData.events || [];
