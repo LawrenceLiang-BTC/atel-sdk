@@ -380,8 +380,8 @@ async function cmdStart(port) {
       return { status: 'rejected', error: pc.reason, proof: rp };
     }
 
-    // ── Capability check ──
-    if (capTypes.length > 0 && !capTypes.includes(action) && !capTypes.includes('general')) {
+    // ── Capability check (strict matching, no wildcards) ──
+    if (capTypes.length > 0 && !capTypes.includes(action)) {
       const reason = `Outside capability: [${capTypes.join(',')}]`;
       const rp = generateRejectionProof(message.from, action, reason, 'CAPABILITY_REJECTED');
       log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
