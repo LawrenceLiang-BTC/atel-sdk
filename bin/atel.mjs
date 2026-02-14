@@ -36,8 +36,9 @@ const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
 const TASKS_FILE = resolve(ATEL_DIR, 'tasks.json');
 const NETWORK_FILE = resolve(ATEL_DIR, 'network.json');
+const TRACES_DIR = resolve(ATEL_DIR, 'traces');
 
-const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [] };
+const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -56,6 +57,8 @@ function loadTasks() { if (!existsSync(TASKS_FILE)) return {}; try { return JSON
 function saveTasks(t) { ensureDir(); writeFileSync(TASKS_FILE, JSON.stringify(t, null, 2)); }
 function loadNetwork() { if (!existsSync(NETWORK_FILE)) return null; try { return JSON.parse(readFileSync(NETWORK_FILE, 'utf-8')); } catch { return null; } }
 function saveNetwork(n) { ensureDir(); writeFileSync(NETWORK_FILE, JSON.stringify(n, null, 2)); }
+function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACES_DIR, { recursive: true }); writeFileSync(resolve(TRACES_DIR, `${taskId}.jsonl`), trace.export()); }
+function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
 
 // ─── Policy Enforcer ─────────────────────────────────────────────
 
@@ -175,6 +178,15 @@ async function cmdStart(port) {
     return { proof_id: proof.proof_id, trace_root: proof.trace_root };
   }
 
+  // ── Trace endpoint (for audit requests from other agents) ──
+  endpoint.app?.get?.('/atel/v1/trace/:taskId', (req, res) => {
+    const taskId = req.params.taskId;
+    const traceData = loadTrace(taskId);
+    if (!traceData) { res.status(404).json({ error: 'Trace not found' }); return; }
+    const events = traceData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+    res.json({ taskId, events, agent: id.did });
+  });
+
   // Result callback: POST /atel/v1/result (executor calls this when done)
   endpoint.app?.post?.('/atel/v1/result', async (req, res) => {
     const { taskId, result, success } = req.body || {};
@@ -219,6 +231,9 @@ async function cmdStart(port) {
     } else {
       trace.finalize(typeof result === 'object' ? result : { result });
     }
+
+    // ── Save Trace (for audit requests) ──
+    saveTrace(taskId, trace);
 
     // ── Proof Generation ──
     const proofGen = new ProofGenerator(trace, id);
@@ -418,6 +433,7 @@ async function cmdStart(port) {
       trace.append('TASK_ACCEPTED', { from: message.from, action, payload });
       const result = { status: 'no_executor', agent: id.agent_id, action, received_payload: payload };
       trace.append('TASK_ECHO', { result }); trace.finalize(result);
+      saveTrace(taskId, trace);
       const proofGen = new ProofGenerator(trace, id);
       const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `task-from-${message.from}`, JSON.stringify(result));
       const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, task_from: message.from, action, taskId });
@@ -581,6 +597,15 @@ async function cmdHandshake(remoteEndpoint, remoteDid) {
 
 async function cmdTask(target, taskJson) {
   const id = requireIdentity();
+  const policy = loadPolicy();
+  const tp = policy.trustPolicy || DEFAULT_POLICY.trustPolicy;
+
+  // Parse task payload and extract risk level
+  const payload = typeof taskJson === 'string' ? JSON.parse(taskJson) : taskJson;
+  const risk = payload._risk || 'low';
+  delete payload._risk;
+  const force = payload._force || false;
+  delete payload._force;
 
   let remoteEndpoint = target;
   let remoteDid;
@@ -590,12 +615,10 @@ async function cmdTask(target, taskJson) {
   if (!target.startsWith('http')) {
     const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
     let entry;
-    // Try as DID first
     try {
       const resp = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(target)}`);
       if (resp.ok) entry = await resp.json();
     } catch {}
-    // Try as capability search
     if (!entry) {
       const results = await regClient.search({ type: target, limit: 5 });
       if (results.length > 0) entry = results[0];
@@ -603,6 +626,34 @@ async function cmdTask(target, taskJson) {
     if (!entry) { console.error(`Agent not found: ${target}`); process.exit(1); }
 
     remoteDid = entry.did;
+
+    // ── Pre-task trust check ──
+    if (!force) {
+      const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
+      let history = {};
+      try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
+      const agentHistory = history[remoteDid] || { tasks: 0, successes: 0, failures: 0, proofs: [] };
+      const threshold = tp.riskThresholds?.[risk] ?? 0;
+      const isNewAgent = agentHistory.tasks === 0;
+
+      if (isNewAgent && tp.newAgentPolicy === 'deny') {
+        console.log(JSON.stringify({ status: 'blocked', reason: 'Trust policy denies unknown agents', did: remoteDid, risk }));
+        process.exit(1);
+      }
+      if (isNewAgent && tp.newAgentPolicy === 'allow_low_risk' && (risk === 'high' || risk === 'critical')) {
+        console.log(JSON.stringify({ status: 'blocked', reason: `New agent, policy only allows low risk for unknowns (requested: ${risk})`, did: remoteDid }));
+        process.exit(1);
+      }
+      if (!isNewAgent && threshold > 0) {
+        const successRate = agentHistory.successes / agentHistory.tasks;
+        const score = Math.round(successRate * 60 + Math.min(agentHistory.tasks / 20, 1) * 15);
+        if (score < threshold) {
+          console.log(JSON.stringify({ status: 'blocked', reason: `Score ${score} below threshold ${threshold} for ${risk} risk`, did: remoteDid, score, threshold, risk }));
+          process.exit(1);
+        }
+      }
+      console.log(JSON.stringify({ event: 'trust_check_passed', did: remoteDid, risk, threshold }));
+    }
 
     // Try candidates if available
     if (entry.candidates && entry.candidates.length > 0) {
@@ -618,6 +669,34 @@ async function cmdTask(target, taskJson) {
     } else {
       remoteEndpoint = entry.endpoint;
     }
+
+    // Try candidates if available
+    if (entry.candidates && entry.candidates.length > 0) {
+      console.log(JSON.stringify({ event: 'connecting', did: remoteDid, candidates: entry.candidates.length }));
+      const conn = await connectToAgent(entry.candidates, remoteDid);
+      if (conn) {
+        remoteEndpoint = conn.url;
+        connectionType = conn.candidateType;
+        console.log(JSON.stringify({ event: 'connected', type: conn.candidateType, url: conn.url, latencyMs: conn.latencyMs }));
+      } else {
+        console.error('All candidates unreachable'); process.exit(1);
+      }
+    } else {
+      remoteEndpoint = entry.endpoint;
+    }
+  }
+
+  // ── Helper: update local trust history after task ──
+  function updateTrustHistory(did, success, proofInfo) {
+    const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
+    let history = {};
+    try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
+    if (!history[did]) history[did] = { tasks: 0, successes: 0, failures: 0, lastSeen: null, proofs: [] };
+    history[did].tasks++;
+    if (success) history[did].successes++; else history[did].failures++;
+    history[did].lastSeen = new Date().toISOString();
+    if (proofInfo) history[did].proofs.push(proofInfo);
+    writeFileSync(localHistoryFile, JSON.stringify(history, null, 2));
   }
 
   if (connectionType === 'relay') {
@@ -647,11 +726,15 @@ async function cmdTask(target, taskJson) {
     await relaySend('/atel/v1/handshake', confirm);
 
     // Step 3: send task
-    const payload = typeof taskJson === 'string' ? JSON.parse(taskJson) : taskJson;
     const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload, secretKey: id.secretKey });
     const result = await relaySend('/atel/v1/task', msg);
 
     console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: 'relay', result }, null, 2));
+
+    // Update local trust history
+    const success = result?.status !== 'rejected' && result?.status !== 'failed';
+    const proofInfo = result?.proof ? { proof_id: result.proof.proof_id, trace_root: result.proof.trace_root, verified: !!result?.anchor?.txHash, anchor_tx: result?.anchor?.txHash || null, timestamp: new Date().toISOString() } : null;
+    if (remoteDid) updateTrustHistory(remoteDid, success, proofInfo);
   } else {
     // Direct mode: standard handshake + task
     const client = new AgentClient(id);
@@ -665,10 +748,14 @@ async function cmdTask(target, taskJson) {
     sessions[remoteEndpoint] = { did: remoteDid };
     writeFileSync(sf, JSON.stringify(sessions, null, 2));
 
-    const payload = typeof taskJson === 'string' ? JSON.parse(taskJson) : taskJson;
     const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload, secretKey: id.secretKey });
     const result = await client.sendTask(remoteEndpoint, msg, hsManager);
     console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: remoteEndpoint, result }, null, 2));
+
+    // Update local trust history
+    const success = result?.status !== 'rejected' && result?.status !== 'failed';
+    const proofInfo = result?.proof ? { proof_id: result.proof.proof_id, trace_root: result.proof.trace_root, verified: !!result?.anchor?.txHash, anchor_tx: result?.anchor?.txHash || null, timestamp: new Date().toISOString() } : null;
+    if (remoteDid) updateTrustHistory(remoteDid, success, proofInfo);
   }
 }
 
@@ -676,6 +763,174 @@ async function cmdResult(taskId, resultJson) {
   const result = typeof resultJson === 'string' ? JSON.parse(resultJson) : resultJson;
   const resp = await fetch(`http://localhost:${process.env.ATEL_PORT || '3100'}/atel/v1/result`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, result, success: true }) });
   console.log(JSON.stringify(await resp.json(), null, 2));
+}
+
+// ─── Trust Verification Commands ─────────────────────────────────
+
+async function cmdCheck(targetDid, riskLevel) {
+  const risk = riskLevel || 'low';
+  const policy = loadPolicy();
+  const tp = policy.trustPolicy || DEFAULT_POLICY.trustPolicy;
+
+  console.log(JSON.stringify({ event: 'checking_trust', did: targetDid, risk }));
+
+  // 1. Get Registry info (reference only)
+  let registryScore = null;
+  let agentName = null;
+  try {
+    const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(targetDid)}`, { signal: AbortSignal.timeout(5000) });
+    if (r.ok) { const d = await r.json(); registryScore = d.trustScore; agentName = d.name; }
+  } catch {}
+
+  // 2. Query on-chain proofs for this DID (via Solana)
+  // For now, use Registry score as baseline + local interaction history
+  const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
+  let history = {};
+  try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
+  const agentHistory = history[targetDid] || { tasks: 0, successes: 0, failures: 0, lastSeen: null, proofs: [] };
+
+  // 3. Compute local trust score
+  let computedScore = 0;
+  if (agentHistory.tasks > 0) {
+    const successRate = agentHistory.successes / agentHistory.tasks;
+    const volumeScore = Math.min(agentHistory.tasks / 20, 1) * 15;
+    const successScore = successRate * 60;
+    const verifiedProofs = agentHistory.proofs.filter(p => p.verified).length;
+    const verifiedRatio = agentHistory.proofs.length > 0 ? verifiedProofs / agentHistory.proofs.length : 0;
+    const proofScore = verifiedRatio * 25;
+    computedScore = Math.round((volumeScore + successScore + proofScore) * 100) / 100;
+  }
+
+  // 4. Apply trust policy
+  const threshold = tp.riskThresholds?.[risk] ?? 0;
+  const effectiveScore = computedScore > 0 ? computedScore : (registryScore || 0);
+  const isNewAgent = agentHistory.tasks === 0;
+  let decision = 'allow';
+  let reason = '';
+
+  if (isNewAgent) {
+    if (tp.newAgentPolicy === 'deny') { decision = 'deny'; reason = 'New agent, policy denies unknown agents'; }
+    else if (tp.newAgentPolicy === 'allow_low_risk' && (risk === 'high' || risk === 'critical')) { decision = 'deny'; reason = `New agent, policy only allows low risk (requested: ${risk})`; }
+    else { decision = 'allow'; reason = `New agent, policy: ${tp.newAgentPolicy}`; }
+  } else if (effectiveScore < threshold) {
+    decision = 'deny';
+    reason = `Score ${effectiveScore} below threshold ${threshold} for ${risk} risk`;
+  } else {
+    decision = 'allow';
+    reason = `Score ${effectiveScore} meets threshold ${threshold} for ${risk} risk`;
+  }
+
+  console.log(JSON.stringify({
+    did: targetDid,
+    name: agentName,
+    trust: {
+      computed_score: computedScore,
+      registry_score: registryScore,
+      effective_score: effectiveScore,
+      total_tasks: agentHistory.tasks,
+      successes: agentHistory.successes,
+      failures: agentHistory.failures,
+      verified_proofs: agentHistory.proofs.filter(p => p.verified).length,
+      total_proofs: agentHistory.proofs.length,
+    },
+    policy: { risk, threshold, decision, reason },
+  }, null, 2));
+}
+
+async function cmdVerifyProof(anchorTx, traceRoot) {
+  if (!anchorTx || !traceRoot) { console.error('Usage: atel verify-proof <anchor_tx> <trace_root>'); process.exit(1); }
+
+  console.log(JSON.stringify({ event: 'verifying_proof', anchor_tx: anchorTx, trace_root: traceRoot }));
+
+  const rpcUrl = process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+  try {
+    const provider = new SolanaAnchorProvider({ rpcUrl });
+    const result = await provider.verify(traceRoot, anchorTx);
+    console.log(JSON.stringify({
+      verified: result.valid,
+      chain: 'solana',
+      anchor_tx: anchorTx,
+      trace_root: traceRoot,
+      detail: result.detail || (result.valid ? 'Memo matches trace_root' : 'Memo does not match'),
+      block: result.blockNumber,
+      timestamp: result.timestamp,
+    }, null, 2));
+  } catch (e) {
+    console.log(JSON.stringify({ verified: false, error: e.message }));
+  }
+}
+
+async function cmdAudit(targetDidOrUrl, taskId) {
+  if (!targetDidOrUrl || !taskId) { console.error('Usage: atel audit <did_or_endpoint> <taskId>'); process.exit(1); }
+
+  // Resolve endpoint
+  let endpoint = targetDidOrUrl;
+  if (targetDidOrUrl.startsWith('did:')) {
+    try {
+      const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(targetDidOrUrl)}`, { signal: AbortSignal.timeout(5000) });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.candidates && d.candidates.length > 0) {
+          const conn = await connectToAgent(d.candidates, targetDidOrUrl);
+          if (conn) endpoint = conn.url;
+        }
+        if (endpoint === targetDidOrUrl && d.endpoint) endpoint = d.endpoint;
+      }
+    } catch {}
+  }
+
+  if (endpoint.startsWith('did:')) { console.error('Could not resolve endpoint for DID'); process.exit(1); }
+
+  console.log(JSON.stringify({ event: 'auditing', target: endpoint, taskId }));
+
+  try {
+    // Fetch trace from target
+    const traceUrl = endpoint.replace(/\/$/, '') + `/atel/v1/trace/${taskId}`;
+    const resp = await fetch(traceUrl, { signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) { console.log(JSON.stringify({ audit: 'failed', error: `Trace fetch failed: ${resp.status}` })); return; }
+    const traceData = await resp.json();
+
+    // Verify hash chain
+    const events = traceData.events || [];
+    let chainValid = true;
+    const chainErrors = [];
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+      const expectedPrev = i === 0 ? '0x00' : events[i - 1].hash;
+      if (e.prev !== expectedPrev) {
+        chainValid = false;
+        chainErrors.push(`Event #${e.seq}: prev mismatch (expected ${expectedPrev}, got ${e.prev})`);
+      }
+    }
+
+    // Recompute merkle root
+    const { createHash } = await import('node:crypto');
+    const hashes = events.map(e => e.hash);
+    let level = [...hashes];
+    while (level.length > 1) {
+      const next = [];
+      for (let i = 0; i < level.length; i += 2) {
+        const left = level[i];
+        const right = i + 1 < level.length ? level[i + 1] : left;
+        next.push(createHash('sha256').update(left + right).digest('hex'));
+      }
+      level = next;
+    }
+    const computedRoot = level[0] || '';
+
+    console.log(JSON.stringify({
+      audit: 'complete',
+      taskId,
+      agent: traceData.agent,
+      events_count: events.length,
+      hash_chain_valid: chainValid,
+      chain_errors: chainErrors,
+      computed_merkle_root: computedRoot,
+      event_types: events.map(e => e.type),
+    }, null, 2));
+  } catch (e) {
+    console.log(JSON.stringify({ audit: 'failed', error: e.message }));
+  }
 }
 
 // ─── Main ────────────────────────────────────────────────────────
@@ -693,6 +948,9 @@ const commands = {
   handshake: () => cmdHandshake(args[0], args[1]),
   task: () => cmdTask(args[0], args[1]),
   result: () => cmdResult(args[0], args[1]),
+  check: () => cmdCheck(args[0], args[1]),
+  'verify-proof': () => cmdVerifyProof(args[0], args[1]),
+  audit: () => cmdAudit(args[0], args[1]),
 };
 
 if (!cmd || !commands[cmd]) {
@@ -710,8 +968,11 @@ Commands:
   register [name] [caps] [endpoint]    Register on public registry
   search <capability>                  Search registry for agents
   handshake <endpoint> [did]           Handshake with remote agent
-  task <endpoint> <json>               Delegate task to remote agent
+  task <target> <json>                 Delegate task (auto trust check)
   result <taskId> <json>               Submit execution result (from executor)
+  check <did> [risk]                   Check agent trust (risk: low|medium|high|critical)
+  verify-proof <anchor_tx> <root>      Verify on-chain proof
+  audit <did_or_url> <taskId>          Deep audit: fetch trace + verify hash chain
 
 Environment:
   ATEL_DIR                Identity directory (default: .atel)
@@ -720,9 +981,8 @@ Environment:
   ATEL_SOLANA_PRIVATE_KEY Solana key for on-chain anchoring
   ATEL_SOLANA_RPC_URL     Solana RPC (default: mainnet-beta)
 
-Network: atel start auto-detects public IP, attempts UPnP port mapping,
-and registers to the Registry. If UPnP fails, configure port forwarding
-on your router and run: atel verify`);
+Trust Policy: Configure .atel/policy.json trustPolicy for automatic
+pre-task trust evaluation. Use _risk in payload or --risk flag.`);
   process.exit(cmd ? 1 : 0);
 }
 

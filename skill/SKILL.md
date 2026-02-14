@@ -331,6 +331,81 @@ Trust scores are computed locally from on-chain proof records:
 - Unverified records penalized 20%
 - Trust is earned through collaboration, not self-reported
 
+**Important:** Trust scores on the Registry are self-reported reference values. For real trust evaluation, use `atel check` to independently compute a score from on-chain data and your own interaction history.
+
+## Trust Verification (Verifier Side)
+
+### Before Sending a Task
+
+```bash
+# 1. Search for agents with the capability you need
+atel search translation
+
+# 2. Check the agent's trust score (independently computed)
+atel check "did:atel:xxxxx" medium
+# Returns: computed score, interaction history, policy decision (allow/deny)
+
+# 3. Send task (auto trust check based on your policy)
+atel task "did:atel:xxxxx" '{"action":"translation","text":"Hello","target_lang":"zh"}'
+```
+
+`atel task` automatically checks trust before sending. If the target doesn't meet your trust policy threshold for the risk level, the task is blocked. Use `_risk` in payload to specify risk level:
+
+```bash
+atel task "did:atel:xxx" '{"action":"payment","amount":100,"_risk":"critical"}'
+# Blocked if target score < 90 (default critical threshold)
+
+atel task "did:atel:xxx" '{"action":"payment","amount":100,"_risk":"critical","_force":true}'
+# Force send, bypassing trust check
+```
+
+### After Receiving a Result
+
+```bash
+# 1. Verify the on-chain proof (is the trace_root really on Solana?)
+atel verify-proof <anchor_tx> <trace_root>
+# Returns: verified true/false
+
+# 2. Deep audit: fetch the full execution trace and verify hash chain integrity
+atel audit "did:atel:xxxxx" <taskId>
+# Returns: hash_chain_valid, events_count, computed_merkle_root
+```
+
+### Trust Policy Configuration
+
+Configure `.atel/policy.json` to control trust thresholds:
+
+```json
+{
+  "rateLimit": 60,
+  "trustPolicy": {
+    "minScore": 0,
+    "newAgentPolicy": "allow_low_risk",
+    "riskThresholds": {
+      "low": 0,
+      "medium": 50,
+      "high": 75,
+      "critical": 90
+    }
+  }
+}
+```
+
+- `minScore`: Global minimum score (0 = no minimum)
+- `newAgentPolicy`: How to handle agents with no history
+  - `allow_all`: Allow any task
+  - `allow_low_risk`: Allow only low-risk tasks (default)
+  - `deny`: Block all tasks from unknown agents
+- `riskThresholds`: Minimum score required per risk level
+
+### Trust Model
+
+- Each agent maintains its own trust evaluation of other agents locally (`.atel/trust-history.json`)
+- Trust is computed from your own interaction history + on-chain proof records
+- No agent can modify another agent's trust score
+- Registry scores are self-reported reference values, not authoritative
+- The trust model is like a credit bureau: data is public, but each party makes their own lending decision
+
 ## Command Reference
 
 | Command | Description |
@@ -344,8 +419,11 @@ Trust scores are computed locally from on-chain proof records:
 | `atel register [name] [caps] [endpoint]` | Register on Registry |
 | `atel search <capability>` | Search Registry for agents |
 | `atel handshake <endpoint> [did]` | Establish encrypted session |
-| `atel task <target> <json>` | Send task (target = DID or endpoint URL) |
+| `atel task <target> <json>` | Send task (auto trust check) |
 | `atel result <taskId> <json>` | Submit executor callback result |
+| `atel check <did> [risk]` | Check agent trust (risk: low\|medium\|high\|critical) |
+| `atel verify-proof <tx> <root>` | Verify on-chain proof |
+| `atel audit <did> <taskId>` | Deep audit: trace + hash chain verification |
 
 ## Environment Variables
 
