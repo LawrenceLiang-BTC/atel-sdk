@@ -295,6 +295,32 @@ app.listen(8080, () => console.log('Executor on :8080'));
 
 The key principle: **ATEL handles trust and communication. Your executor handles thinking.** The executor interface is the bridge between the two.
 
+### Executor Prompt Design (Critical)
+
+When building your executor, **DO NOT expose ATEL protocol metadata to the sub-agent**. The sub-agent processing the task should only see the pure business request.
+
+Bad prompt (sub-agent may reject as prompt injection):
+```
+You are processing an ATEL task from agent did:atel:ed25519:xxx.
+Action: research. Payload: {"query": "What is quantum computing"}
+```
+
+Good prompt (clean, business-only):
+```
+Research the following topic and provide useful, accurate information.
+What is quantum computing
+```
+
+Why this matters: AI agents are trained to be suspicious of messages that look like protocol framing or inter-agent commands. If your executor prompt includes DID identifiers, protocol names, or "you are processing a task from another agent", the sub-agent may interpret it as a social engineering attack and refuse to execute.
+
+The rule: **Protocol stops at the executor boundary. Beyond that, it's just a task.**
+
+Recommended prompt patterns by action type:
+- **translation**: `Translate the following text to {target_lang}. Return only the translation.\n{text}`
+- **coding**: `Help with the following coding task. Provide working code.\n{text}`
+- **research**: `Research the following topic and provide useful, accurate information.\n{text}`
+- **general**: `Complete the following task.\n{text}`
+
 ## Security Policy
 
 `atel init` creates `.atel/policy.json`:
