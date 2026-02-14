@@ -59,7 +59,7 @@ export function generateKeyPair(): KeyPair {
 
 /**
  * Create a DID (Decentralized Identifier) from a public key.
- * Format: "did:atel:<base58(publicKey)>"
+ * Format: "did:atel:ed25519:<base58(publicKey)>"
  * @param publicKey - The 32-byte Ed25519 public key.
  * @returns The DID string.
  */
@@ -68,21 +68,33 @@ export function createDID(publicKey: Uint8Array): string {
     throw new IdentityError(`Invalid public key length: expected 32, got ${publicKey.length}`);
   }
   const encoded = bs58.encode(publicKey);
-  return `did:atel:${encoded}`;
+  return `did:atel:ed25519:${encoded}`;
 }
 
 /**
  * Parse a DID string and extract the public key bytes.
- * @param did - A DID string in format "did:atel:<base58>"
+ * Supports both formats:
+ *   - "did:atel:ed25519:<base58>" (current)
+ *   - "did:atel:<base58>" (legacy, for backward compatibility)
+ * @param did - A DID string.
  * @returns The decoded 32-byte public key.
  */
 export function parseDID(did: string): Uint8Array {
   const parts = did.split(':');
-  if (parts.length !== 3 || parts[0] !== 'did' || parts[1] !== 'atel') {
+  let base58Part: string;
+
+  if (parts.length === 4 && parts[0] === 'did' && parts[1] === 'atel' && parts[2] === 'ed25519') {
+    // New format: did:atel:ed25519:<base58>
+    base58Part = parts[3];
+  } else if (parts.length === 3 && parts[0] === 'did' && parts[1] === 'atel') {
+    // Legacy format: did:atel:<base58>
+    base58Part = parts[2];
+  } else {
     throw new IdentityError(`Invalid DID format: ${did}`);
   }
+
   try {
-    const decoded = bs58.decode(parts[2]);
+    const decoded = bs58.decode(base58Part);
     if (decoded.length !== 32) {
       throw new IdentityError(`Invalid public key in DID: expected 32 bytes, got ${decoded.length}`);
     }
@@ -219,5 +231,96 @@ export class AgentIdentity {
       pub.metadata = this.metadata;
     }
     return pub;
+  }
+}
+
+// ─── Key Rotation ────────────────────────────────────────────────
+
+/**
+ * Proof of key rotation: signed by both old and new keys.
+ * This allows verifiers to confirm the rotation was authorized by the original identity.
+ */
+export interface KeyRotationProof {
+  /** The agent's original DID (old key) */
+  oldDid: string;
+  /** The agent's new DID (new key) */
+  newDid: string;
+  /** New public key (base64) */
+  newPublicKey: string;
+  /** ISO 8601 timestamp of rotation */
+  timestamp: string;
+  /** Signature of {oldDid, newDid, newPublicKey, timestamp} by OLD secret key */
+  oldSignature: string;
+  /** Signature of {oldDid, newDid, newPublicKey, timestamp} by NEW secret key */
+  newSignature: string;
+}
+
+/**
+ * Rotate an agent's identity key pair.
+ * Generates a new key pair and produces a rotation proof signed by both old and new keys.
+ * The proof can be anchored on-chain and submitted to the Registry.
+ *
+ * @param oldIdentity - The current identity (with secret key).
+ * @returns The new identity and the rotation proof.
+ */
+export function rotateKey(oldIdentity: AgentIdentity): {
+  newIdentity: AgentIdentity;
+  proof: KeyRotationProof;
+} {
+  const newKp = generateKeyPair();
+  const newIdentity = new AgentIdentity({
+    agent_id: oldIdentity.agent_id,
+    publicKey: newKp.publicKey,
+    secretKey: newKp.secretKey,
+    metadata: oldIdentity.metadata,
+  });
+
+  const rotationData = {
+    oldDid: oldIdentity.did,
+    newDid: newIdentity.did,
+    newPublicKey: Buffer.from(newKp.publicKey).toString('base64'),
+    timestamp: new Date().toISOString(),
+  };
+
+  const signable = serializePayload(rotationData);
+  const oldSignature = sign(signable, oldIdentity.secretKey);
+  const newSignature = sign(signable, newIdentity.secretKey);
+
+  return {
+    newIdentity,
+    proof: {
+      ...rotationData,
+      oldSignature,
+      newSignature,
+    },
+  };
+}
+
+/**
+ * Verify a key rotation proof.
+ * Checks that both old and new keys signed the rotation data.
+ *
+ * @param proof - The rotation proof to verify.
+ * @returns True if both signatures are valid.
+ */
+export function verifyKeyRotation(proof: KeyRotationProof): boolean {
+  try {
+    const oldPk = parseDID(proof.oldDid);
+    const newPk = parseDID(proof.newDid);
+
+    const rotationData = {
+      oldDid: proof.oldDid,
+      newDid: proof.newDid,
+      newPublicKey: proof.newPublicKey,
+      timestamp: proof.timestamp,
+    };
+    const signable = serializePayload(rotationData);
+
+    const oldValid = verify(signable, proof.oldSignature, oldPk);
+    const newValid = verify(signable, proof.newSignature, newPk);
+
+    return oldValid && newValid;
+  } catch {
+    return false;
   }
 }

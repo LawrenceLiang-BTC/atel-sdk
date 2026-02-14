@@ -24,7 +24,7 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
-  RollbackManager,
+  RollbackManager, rotateKey, verifyKeyRotation,
 } from '@lawreneliang/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -59,6 +59,31 @@ function loadNetwork() { if (!existsSync(NETWORK_FILE)) return null; try { retur
 function saveNetwork(n) { ensureDir(); writeFileSync(NETWORK_FILE, JSON.stringify(n, null, 2)); }
 function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACES_DIR, { recursive: true }); writeFileSync(resolve(TRACES_DIR, `${taskId}.jsonl`), trace.export()); }
 function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
+
+// ─── Trust Level System ──────────────────────────────────────────
+// Level 0: Zero Trust — new agent, no history. Only low-risk tasks.
+// Level 1: Basic Trust — some successful tasks. Low + medium risk.
+// Level 2: Verified Trust — consistent success + verified proofs. Low + medium + high risk.
+// Level 3: Enterprise Trust — long track record + high score. All risk levels.
+
+function computeTrustLevel(agentHistory) {
+  if (!agentHistory || agentHistory.tasks === 0) return { level: 0, name: 'zero_trust', maxRisk: 'low' };
+  const successRate = agentHistory.successes / agentHistory.tasks;
+  const verifiedProofs = agentHistory.proofs ? agentHistory.proofs.filter(p => p.verified).length : 0;
+  const verifiedRatio = agentHistory.proofs?.length > 0 ? verifiedProofs / agentHistory.proofs.length : 0;
+
+  // Level 3: 20+ tasks, 95%+ success, 80%+ verified proofs
+  if (agentHistory.tasks >= 20 && successRate >= 0.95 && verifiedRatio >= 0.8) return { level: 3, name: 'enterprise_trust', maxRisk: 'critical' };
+  // Level 2: 10+ tasks, 90%+ success, 50%+ verified proofs
+  if (agentHistory.tasks >= 10 && successRate >= 0.9 && verifiedRatio >= 0.5) return { level: 2, name: 'verified_trust', maxRisk: 'high' };
+  // Level 1: 3+ tasks, 70%+ success
+  if (agentHistory.tasks >= 3 && successRate >= 0.7) return { level: 1, name: 'basic_trust', maxRisk: 'medium' };
+  // Level 0
+  return { level: 0, name: 'zero_trust', maxRisk: 'low' };
+}
+
+const RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
+function riskAllowed(maxRisk, requestedRisk) { return (RISK_ORDER[requestedRisk] || 0) <= (RISK_ORDER[maxRisk] || 0); }
 
 // ─── Policy Enforcer ─────────────────────────────────────────────
 
@@ -656,7 +681,13 @@ async function cmdTask(target, taskJson) {
           process.exit(1);
         }
       }
-      console.log(JSON.stringify({ event: 'trust_check_passed', did: remoteDid, risk, threshold }));
+      // Trust level check
+      const trustLevel = computeTrustLevel(agentHistory);
+      if (!riskAllowed(trustLevel.maxRisk, risk)) {
+        console.log(JSON.stringify({ status: 'blocked', reason: `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`, did: remoteDid, level: trustLevel.level, maxRisk: trustLevel.maxRisk }));
+        process.exit(1);
+      }
+      console.log(JSON.stringify({ event: 'trust_check_passed', did: remoteDid, risk, threshold, level: trustLevel.level, level_name: trustLevel.name }));
     }
 
     // Try candidates if available
@@ -853,6 +884,15 @@ async function cmdCheck(targetDid, riskLevel) {
     reason = `Score ${effectiveScore} meets threshold ${threshold} for ${risk} risk`;
   }
 
+  // Trust level
+  const trustLevel = computeTrustLevel(agentHistory);
+
+  // Override decision based on trust level
+  if (decision === 'allow' && !riskAllowed(trustLevel.maxRisk, risk)) {
+    decision = 'deny';
+    reason = `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`;
+  }
+
   console.log(JSON.stringify({
     did: targetDid,
     name: agentName,
@@ -860,6 +900,9 @@ async function cmdCheck(targetDid, riskLevel) {
       computed_score: computedScore,
       registry_score: registryScore,
       effective_score: effectiveScore,
+      level: trustLevel.level,
+      level_name: trustLevel.name,
+      max_risk: trustLevel.maxRisk,
       total_tasks: agentHistory.tasks,
       successes: agentHistory.successes,
       failures: agentHistory.failures,
@@ -981,6 +1024,60 @@ async function cmdAudit(targetDidOrUrl, taskId) {
   }
 }
 
+// ─── Key Rotation ────────────────────────────────────────────────
+
+async function cmdRotate() {
+  const oldId = requireIdentity();
+  const oldDid = oldId.did;
+
+  // Backup old identity
+  const backupFile = resolve(ATEL_DIR, `identity.backup.${Date.now()}.json`);
+  writeFileSync(backupFile, readFileSync(IDENTITY_FILE, 'utf-8'));
+
+  // Rotate
+  const { newIdentity, proof } = rotateKey(oldId);
+  saveIdentity(newIdentity);
+
+  // Save rotation proof
+  const proofsDir = resolve(ATEL_DIR, 'rotation-proofs');
+  if (!existsSync(proofsDir)) mkdirSync(proofsDir, { recursive: true });
+  writeFileSync(resolve(proofsDir, `${Date.now()}.json`), JSON.stringify(proof, null, 2));
+
+  // Anchor rotation on-chain if possible
+  let anchor = null;
+  const key = process.env.ATEL_SOLANA_PRIVATE_KEY;
+  if (key) {
+    try {
+      const s = new SolanaAnchorProvider({ rpcUrl: process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', privateKey: key });
+      const { createHash } = await import('node:crypto');
+      const rotationHash = createHash('sha256').update(JSON.stringify(proof)).digest('hex');
+      anchor = await s.anchor(`rotation:${rotationHash}`, { oldDid, newDid: newIdentity.did, type: 'key_rotation' });
+    } catch (e) { console.log(JSON.stringify({ warning: 'On-chain anchor failed', error: e.message })); }
+  }
+
+  // Update Registry
+  try {
+    const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
+    const caps = loadCapabilities();
+    const net = loadNetwork();
+    const policy = loadPolicy();
+    const ep = net?.endpoint || 'http://localhost:3100';
+    const discoverable = policy.discoverable !== false;
+    await regClient.register({ name: newIdentity.agent_id, capabilities: caps, endpoint: ep, candidates: net?.candidates || [], discoverable }, newIdentity);
+    console.log(JSON.stringify({ event: 'registry_updated', newDid: newIdentity.did }));
+  } catch (e) { console.log(JSON.stringify({ warning: 'Registry update failed', error: e.message })); }
+
+  console.log(JSON.stringify({
+    status: 'rotated',
+    oldDid,
+    newDid: newIdentity.did,
+    backup: backupFile,
+    proof_valid: verifyKeyRotation(proof),
+    anchor: anchor ? { chain: 'solana', txHash: anchor.txHash } : null,
+    next: 'Restart endpoint: atel start [port]',
+  }, null, 2));
+}
+
 // ─── Main ────────────────────────────────────────────────────────
 
 const [,, cmd, ...args] = process.argv;
@@ -999,6 +1096,7 @@ const commands = {
   check: () => cmdCheck(args[0], args[1]),
   'verify-proof': () => cmdVerifyProof(args[0], args[1]),
   audit: () => cmdAudit(args[0], args[1]),
+  rotate: () => cmdRotate(),
 };
 
 if (!cmd || !commands[cmd]) {
@@ -1021,6 +1119,7 @@ Commands:
   check <did> [risk]                   Check agent trust (risk: low|medium|high|critical)
   verify-proof <anchor_tx> <root>      Verify on-chain proof
   audit <did_or_url> <taskId>          Deep audit: fetch trace + verify hash chain
+  rotate                               Rotate identity key pair (backup + on-chain anchor)
 
 Environment:
   ATEL_DIR                Identity directory (default: .atel)

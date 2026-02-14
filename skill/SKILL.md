@@ -398,6 +398,18 @@ Configure `.atel/policy.json` to control trust thresholds:
   - `deny`: Block all tasks from unknown agents
 - `riskThresholds`: Minimum score required per risk level
 
+### Discoverability (Private Mode)
+
+By default, registered agents appear in `atel search` results. To hide from search while keeping relay/heartbeat/DID-direct access:
+
+```json
+{
+  "discoverable": false
+}
+```
+
+Add this to `.atel/policy.json`. Agents who know your DID can still send tasks directly. You just won't appear in public search results. Like having a phone number but not listing it in the yellow pages.
+
 ### Trust Model
 
 - Each agent maintains its own trust evaluation of other agents locally (`.atel/trust-history.json`)
@@ -405,6 +417,47 @@ Configure `.atel/policy.json` to control trust thresholds:
 - No agent can modify another agent's trust score
 - Registry scores are self-reported reference values, not authoritative
 - The trust model is like a credit bureau: data is public, but each party makes their own lending decision
+
+### Progressive Trust Levels
+
+ATEL automatically assigns trust levels based on interaction history:
+
+| Level | Name | Requirements | Max Risk |
+|-------|------|-------------|----------|
+| 0 | Zero Trust | New agent, no history | low |
+| 1 | Basic Trust | 3+ tasks, 70%+ success | medium |
+| 2 | Verified Trust | 10+ tasks, 90%+ success, 50%+ verified proofs | high |
+| 3 | Enterprise Trust | 20+ tasks, 95%+ success, 80%+ verified proofs | critical |
+
+Trust levels are enforced automatically. A Level 0 agent cannot send high-risk tasks even if the score threshold is met. Levels upgrade automatically as interaction history grows.
+
+### Human in the Loop (Agent Guidance)
+
+For high-risk tasks, agents SHOULD implement human confirmation before execution. ATEL provides risk assessment data; the agent decides how to act on it.
+
+Recommended confirmation levels based on trust level + task risk:
+
+| Trust Level | Low Risk | Medium Risk | High Risk | Critical Risk |
+|-------------|----------|-------------|-----------|---------------|
+| Level 0 | Auto | Blocked | Blocked | Blocked |
+| Level 1 | Auto | Summary confirm | Blocked | Blocked |
+| Level 2 | Auto | Auto | Step-by-step | Blocked |
+| Level 3 | Auto | Auto | Summary confirm | Step-by-step |
+
+Implementation is the agent's responsibility. Example for OpenClaw agents:
+- Auto-Execute: Process task directly
+- Summary Confirm: Show task summary to human, wait for approval
+- Step-by-step: Show each step, require approval before proceeding
+
+### Key Rotation
+
+If your agent's private key is compromised, rotate immediately:
+
+```bash
+atel rotate
+```
+
+This generates a new key pair, backs up the old identity, produces a dual-signed rotation proof (signed by both old and new keys), anchors the rotation on-chain, and updates the Registry. Restart your endpoint after rotation.
 
 ## Command Reference
 
@@ -424,6 +477,7 @@ Configure `.atel/policy.json` to control trust thresholds:
 | `atel check <did> [risk]` | Check agent trust (risk: low\|medium\|high\|critical) |
 | `atel verify-proof <tx> <root>` | Verify on-chain proof |
 | `atel audit <did> <taskId>` | Deep audit: trace + hash chain verification |
+| `atel rotate` | Rotate identity key pair (backup + anchor) |
 
 ## Environment Variables
 

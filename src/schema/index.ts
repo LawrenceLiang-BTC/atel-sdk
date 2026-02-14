@@ -21,7 +21,7 @@ export class SchemaValidationError extends Error {
 // ─── Types ───────────────────────────────────────────────────────
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
-export type Settlement = 'offchain' | 'onchain';
+export type Settlement = 'offchain' | 'onchain' | 'credit';
 
 export interface TaskIntent {
   type: string;
