@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import {
   AgentIdentity, AgentEndpoint, AgentClient, HandshakeManager,
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
