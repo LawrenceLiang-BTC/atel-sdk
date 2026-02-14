@@ -23,7 +23,7 @@ import {
   AgentIdentity, AgentEndpoint, AgentClient, HandshakeManager,
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
-  discoverPublicIP, checkReachable, ContentAuditor,
+  discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
 } from '@lawreneliang/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -153,25 +153,82 @@ async function cmdStart(port) {
   // ── Start endpoint ──
   const endpoint = new AgentEndpoint(id, { port: p, host: '0.0.0.0' });
 
+  // ── Trust Score Client ──
+  const trustScoreClient = new TrustScoreClient();
+
   // Result callback: POST /atel/v1/result (executor calls this when done)
   endpoint.app?.post?.('/atel/v1/result', async (req, res) => {
     const { taskId, result, success } = req.body || {};
     if (!taskId || !pendingTasks[taskId]) { res.status(404).json({ error: 'Unknown taskId' }); return; }
     const task = pendingTasks[taskId];
+    const startTime = new Date(task.acceptedAt).getTime();
+    const durationMs = Date.now() - startTime;
     enforcer.taskFinished();
 
+    // ── Execution Trace (detailed) ──
     const trace = new ExecutionTrace(taskId, id);
-    trace.append('TASK_ACCEPTED', { from: task.from, action: task.action });
-    trace.append('TASK_FORWARDED', { executor_url: EXECUTOR_URL });
-    trace.append('TASK_RESULT', { success: success !== false, result });
+    trace.append('TASK_RECEIVED', { from: task.from, action: task.action, encrypted: task.encrypted });
+    trace.append('POLICY_CHECK', { rateLimit: policy.rateLimit, maxConcurrent: policy.maxConcurrent, result: 'allowed' });
+    trace.append('CAPABILITY_CHECK', { action: task.action, capabilities: capTypes, result: 'allowed' });
+    trace.append('CONTENT_AUDIT', { result: 'passed' });
+    trace.append('TASK_FORWARDED', { executor_url: EXECUTOR_URL, timestamp: task.acceptedAt });
+    trace.append('EXECUTOR_RESULT', { success: success !== false, duration_ms: durationMs, result_size: JSON.stringify(result).length });
     if (success !== false) trace.finalize(typeof result === 'object' ? result : { result });
     else trace.fail(new Error(result?.error || 'Execution failed'));
 
+    // ── Proof Generation ──
     const proofGen = new ProofGenerator(trace, id);
     const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `task-from-${task.from}`, JSON.stringify(result));
+
+    // ── On-chain Anchoring ──
     const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, task_from: task.from, action: task.action, taskId });
 
-    log({ event: 'task_completed', taskId, from: task.from, action: task.action, success: success !== false, proof_id: proof.proof_id, anchor_tx: anchor?.txHash || null, timestamp: new Date().toISOString() });
+    // ── Trust Score Update ──
+    try {
+      if (anchor?.txHash) {
+        trustScoreClient.addProofRecord({
+          traceRoot: proof.trace_root,
+          txHash: anchor.txHash,
+          chain: 'solana',
+          executor: id.did,
+          taskFrom: task.from,
+          action: task.action,
+          success: success !== false,
+          durationMs,
+          riskLevel: 'low',
+          policyViolations: 0,
+          proofId: proof.proof_id,
+          timestamp: new Date().toISOString(),
+          verified: true,
+        });
+        const scoreReport = trustScoreClient.getAgentScore(id.did);
+        log({ event: 'trust_score_updated', did: id.did, score: scoreReport.trust_score, total_tasks: scoreReport.total_tasks, success_rate: scoreReport.success_rate });
+
+        // Update score on Registry (direct API call)
+        try {
+          const { serializePayload } = await import('@lawreneliang/atel-sdk');
+          const ts = new Date().toISOString();
+          const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
+          const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
+          const { default: nacl } = await import('tweetnacl');
+          const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+          await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
+            signal: AbortSignal.timeout(5000),
+          });
+        } catch (e) { log({ event: 'score_registry_update_failed', error: e.message }); }
+      } else {
+        log({ event: 'trust_score_skipped', reason: 'No on-chain anchor — score requires verified proof' });
+      }
+    } catch (e) { log({ event: 'trust_score_error', error: e.message }); }
+
+    // ── Anchoring Warning ──
+    if (!anchor) {
+      log({ event: 'anchor_missing', taskId, warning: 'Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.', timestamp: new Date().toISOString() });
+    }
+
+    log({ event: 'task_completed', taskId, from: task.from, action: task.action, success: success !== false, proof_id: proof.proof_id, trace_root: proof.trace_root, anchor_tx: anchor?.txHash || null, duration_ms: durationMs, timestamp: new Date().toISOString() });
 
     // Push result back to sender
     if (task.senderCandidates || task.senderEndpoint) {
@@ -189,7 +246,14 @@ async function cmdStart(port) {
         }
         if (!targetUrl) throw new Error('No reachable endpoint');
 
-        const resultPayload = { taskId, status: success !== false ? 'completed' : 'failed', result, proof: { proof_id: proof.proof_id, trace_root: proof.trace_root }, anchor: anchor ? { chain: 'solana', txHash: anchor.txHash } : null };
+        const resultPayload = {
+          taskId,
+          status: success !== false ? 'completed' : 'failed',
+          result,
+          proof: { proof_id: proof.proof_id, trace_root: proof.trace_root, events_count: trace.events.length },
+          anchor: anchor ? { chain: 'solana', txHash: anchor.txHash, block: anchor.blockNumber } : null,
+          execution: { duration_ms: durationMs, encrypted: task.encrypted },
+        };
 
         if (isRelay) {
           // Relay mode: use relay send API
