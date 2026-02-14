@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { serializePayload } from '@lawreneliang/atel-sdk';
+import { serializePayload } from '@lawrenceliang-btc/atel-sdk';
 
 export class TunnelManager extends EventEmitter {
   constructor(type, port, registryClient, identity) {

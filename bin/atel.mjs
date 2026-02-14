@@ -25,7 +25,7 @@ import {
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
   RollbackManager, rotateKey, verifyKeyRotation,
-} from '@lawreneliang/atel-sdk';
+} from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
 const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
@@ -60,30 +60,77 @@ function saveNetwork(n) { ensureDir(); writeFileSync(NETWORK_FILE, JSON.stringif
 function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACES_DIR, { recursive: true }); writeFileSync(resolve(TRACES_DIR, `${taskId}.jsonl`), trace.export()); }
 function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
 
-// ─── Trust Level System ──────────────────────────────────────────
-// Level 0: Zero Trust — new agent, no history. Only low-risk tasks.
-// Level 1: Basic Trust — some successful tasks. Low + medium risk.
-// Level 2: Verified Trust — consistent success + verified proofs. Low + medium + high risk.
-// Level 3: Enterprise Trust — long track record + high score. All risk levels.
+// ─── Unified Trust Score & Level System ──────────────────────────
+// Single source of truth: computeTrustScore() calculates score,
+// trustLevel is derived from score. No independent logic.
+//
+// Score formula (0-100):
+//   - Success rate:    successRate * 40  (max 40)
+//   - Task volume:     min(tasks/20, 1) * 25  (max 25, needs 20+ tasks for full credit)
+//   - Verified proofs: verifiedRatio * 25  (max 25, on-chain proof is critical)
+//   - Chain bonus:     +10 if has on-chain history (capped at 100)
+//
+// Level mapping (derived from score):
+//   Level 0 (zero_trust):       score < 30   → max risk: low
+//   Level 1 (basic_trust):      score 30-59  → max risk: medium
+//   Level 2 (verified_trust):   score 60-84  → max risk: high
+//   Level 3 (enterprise_trust): score >= 85  → max risk: critical
 
-function computeTrustLevel(agentHistory) {
-  if (!agentHistory || agentHistory.tasks === 0) return { level: 0, name: 'zero_trust', maxRisk: 'low' };
+function computeTrustScore(agentHistory) {
+  if (!agentHistory || agentHistory.tasks === 0) return 0;
   const successRate = agentHistory.successes / agentHistory.tasks;
+  const volumeScore = Math.min(agentHistory.tasks / 20, 1) * 25;
+  const successScore = successRate * 40;
   const verifiedProofs = agentHistory.proofs ? agentHistory.proofs.filter(p => p.verified).length : 0;
   const verifiedRatio = agentHistory.proofs?.length > 0 ? verifiedProofs / agentHistory.proofs.length : 0;
+  const proofScore = verifiedRatio * 25;
+  const chainBonus = verifiedProofs > 0 ? 10 : 0;
+  return Math.min(100, Math.round((volumeScore + successScore + proofScore + chainBonus) * 100) / 100);
+}
 
-  // Level 3: 20+ tasks, 95%+ success, 80%+ verified proofs
-  if (agentHistory.tasks >= 20 && successRate >= 0.95 && verifiedRatio >= 0.8) return { level: 3, name: 'enterprise_trust', maxRisk: 'critical' };
-  // Level 2: 10+ tasks, 90%+ success, 50%+ verified proofs
-  if (agentHistory.tasks >= 10 && successRate >= 0.9 && verifiedRatio >= 0.5) return { level: 2, name: 'verified_trust', maxRisk: 'high' };
-  // Level 1: 3+ tasks, 70%+ success
-  if (agentHistory.tasks >= 3 && successRate >= 0.7) return { level: 1, name: 'basic_trust', maxRisk: 'medium' };
-  // Level 0
+function computeTrustLevel(score) {
+  if (score >= 85) return { level: 3, name: 'enterprise_trust', maxRisk: 'critical' };
+  if (score >= 60) return { level: 2, name: 'verified_trust', maxRisk: 'high' };
+  if (score >= 30) return { level: 1, name: 'basic_trust', maxRisk: 'medium' };
   return { level: 0, name: 'zero_trust', maxRisk: 'low' };
 }
 
 const RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
 function riskAllowed(maxRisk, requestedRisk) { return (RISK_ORDER[requestedRisk] || 0) <= (RISK_ORDER[maxRisk] || 0); }
+
+// Unified trust check — single function used by all code paths
+function checkTrust(remoteDid, risk, policy, force) {
+  if (force) return { passed: true };
+  const tp = policy.trustPolicy || DEFAULT_POLICY.trustPolicy;
+  const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
+  let history = {};
+  try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
+  const agentHistory = history[remoteDid] || { tasks: 0, successes: 0, failures: 0, proofs: [] };
+  const isNewAgent = agentHistory.tasks === 0;
+
+  // New agent policy
+  if (isNewAgent) {
+    if (tp.newAgentPolicy === 'deny') return { passed: false, reason: 'Trust policy denies unknown agents', did: remoteDid, risk };
+    if (tp.newAgentPolicy === 'allow_low_risk' && (risk === 'high' || risk === 'critical')) return { passed: false, reason: `New agent, policy only allows low risk (requested: ${risk})`, did: remoteDid };
+  }
+
+  // Compute score and level
+  const score = computeTrustScore(agentHistory);
+  const trustLevel = computeTrustLevel(score);
+  const threshold = tp.riskThresholds?.[risk] ?? 0;
+
+  // Check score threshold
+  if (!isNewAgent && threshold > 0 && score < threshold) {
+    return { passed: false, reason: `Score ${score} below threshold ${threshold} for ${risk} risk`, did: remoteDid, score, threshold, risk, level: trustLevel.level };
+  }
+
+  // Check level-based risk cap
+  if (!riskAllowed(trustLevel.maxRisk, risk)) {
+    return { passed: false, reason: `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`, did: remoteDid, level: trustLevel.level, maxRisk: trustLevel.maxRisk };
+  }
+
+  return { passed: true, score, level: trustLevel.level, levelName: trustLevel.name, threshold };
+}
 
 // ─── Policy Enforcer ─────────────────────────────────────────────
 
@@ -656,38 +703,14 @@ async function cmdTask(target, taskJson) {
 
     remoteDid = entry.did;
 
-    // ── Pre-task trust check ──
+    // ── Pre-task trust check (unified) ──
+    const trustResult = checkTrust(remoteDid, risk, policy, force);
+    if (!trustResult.passed) {
+      console.log(JSON.stringify({ status: 'blocked', ...trustResult }));
+      process.exit(1);
+    }
     if (!force) {
-      const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
-      let history = {};
-      try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
-      const agentHistory = history[remoteDid] || { tasks: 0, successes: 0, failures: 0, proofs: [] };
-      const threshold = tp.riskThresholds?.[risk] ?? 0;
-      const isNewAgent = agentHistory.tasks === 0;
-
-      if (isNewAgent && tp.newAgentPolicy === 'deny') {
-        console.log(JSON.stringify({ status: 'blocked', reason: 'Trust policy denies unknown agents', did: remoteDid, risk }));
-        process.exit(1);
-      }
-      if (isNewAgent && tp.newAgentPolicy === 'allow_low_risk' && (risk === 'high' || risk === 'critical')) {
-        console.log(JSON.stringify({ status: 'blocked', reason: `New agent, policy only allows low risk for unknowns (requested: ${risk})`, did: remoteDid }));
-        process.exit(1);
-      }
-      if (!isNewAgent && threshold > 0) {
-        const successRate = agentHistory.successes / agentHistory.tasks;
-        const score = Math.round(successRate * 60 + Math.min(agentHistory.tasks / 20, 1) * 15);
-        if (score < threshold) {
-          console.log(JSON.stringify({ status: 'blocked', reason: `Score ${score} below threshold ${threshold} for ${risk} risk`, did: remoteDid, score, threshold, risk }));
-          process.exit(1);
-        }
-      }
-      // Trust level check
-      const trustLevel = computeTrustLevel(agentHistory);
-      if (!riskAllowed(trustLevel.maxRisk, risk)) {
-        console.log(JSON.stringify({ status: 'blocked', reason: `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`, did: remoteDid, level: trustLevel.level, maxRisk: trustLevel.maxRisk }));
-        process.exit(1);
-      }
-      console.log(JSON.stringify({ event: 'trust_check_passed', did: remoteDid, risk, threshold, level: trustLevel.level, level_name: trustLevel.name }));
+      console.log(JSON.stringify({ event: 'trust_check_passed', did: remoteDid, risk, score: trustResult.score, level: trustResult.level, level_name: trustResult.levelName }));
     }
 
     // Try candidates if available
@@ -808,15 +831,11 @@ async function cmdTask(target, taskJson) {
       const h = await client.health(remoteEndpoint); remoteDid = h.did;
     }
 
-    // Trust check for direct mode too
+    // Trust check for direct mode too (unified)
     if (!force && remoteDid) {
-      const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
-      let history = {};
-      try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
-      const agentHistory = history[remoteDid] || { tasks: 0, successes: 0, failures: 0, proofs: [] };
-      const trustLevel = computeTrustLevel(agentHistory);
-      if (!riskAllowed(trustLevel.maxRisk, risk)) {
-        console.log(JSON.stringify({ status: 'blocked', reason: `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`, did: remoteDid, level: trustLevel.level, maxRisk: trustLevel.maxRisk }));
+      const trustResult = checkTrust(remoteDid, risk, policy, false);
+      if (!trustResult.passed) {
+        console.log(JSON.stringify({ status: 'blocked', ...trustResult }));
         process.exit(1);
       }
     }
@@ -859,26 +878,17 @@ async function cmdCheck(targetDid, riskLevel) {
     if (r.ok) { const d = await r.json(); registryScore = d.trustScore; agentName = d.name; }
   } catch {}
 
-  // 2. Query on-chain proofs for this DID (via Solana)
-  // For now, use Registry score as baseline + local interaction history
+  // 2. Local interaction history
   const localHistoryFile = resolve(ATEL_DIR, 'trust-history.json');
   let history = {};
   try { history = JSON.parse(readFileSync(localHistoryFile, 'utf-8')); } catch {}
   const agentHistory = history[targetDid] || { tasks: 0, successes: 0, failures: 0, lastSeen: null, proofs: [] };
 
-  // 3. Compute local trust score
-  let computedScore = 0;
-  if (agentHistory.tasks > 0) {
-    const successRate = agentHistory.successes / agentHistory.tasks;
-    const volumeScore = Math.min(agentHistory.tasks / 20, 1) * 15;
-    const successScore = successRate * 60;
-    const verifiedProofs = agentHistory.proofs.filter(p => p.verified).length;
-    const verifiedRatio = agentHistory.proofs.length > 0 ? verifiedProofs / agentHistory.proofs.length : 0;
-    const proofScore = verifiedRatio * 25;
-    computedScore = Math.round((volumeScore + successScore + proofScore) * 100) / 100;
-  }
+  // 3. Compute unified trust score and level
+  const computedScore = computeTrustScore(agentHistory);
+  const trustLevel = computeTrustLevel(computedScore);
 
-  // 4. Apply trust policy
+  // 4. Apply trust policy (unified)
   const threshold = tp.riskThresholds?.[risk] ?? 0;
   const effectiveScore = computedScore > 0 ? computedScore : (registryScore || 0);
   const isNewAgent = agentHistory.tasks === 0;
@@ -892,18 +902,12 @@ async function cmdCheck(targetDid, riskLevel) {
   } else if (effectiveScore < threshold) {
     decision = 'deny';
     reason = `Score ${effectiveScore} below threshold ${threshold} for ${risk} risk`;
+  } else if (!riskAllowed(trustLevel.maxRisk, risk)) {
+    decision = 'deny';
+    reason = `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`;
   } else {
     decision = 'allow';
     reason = `Score ${effectiveScore} meets threshold ${threshold} for ${risk} risk`;
-  }
-
-  // Trust level
-  const trustLevel = computeTrustLevel(agentHistory);
-
-  // Override decision based on trust level
-  if (decision === 'allow' && !riskAllowed(trustLevel.maxRisk, risk)) {
-    decision = 'deny';
-    reason = `Trust level ${trustLevel.level} (${trustLevel.name}) only allows up to ${trustLevel.maxRisk} risk, requested ${risk}`;
   }
 
   console.log(JSON.stringify({

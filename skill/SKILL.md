@@ -446,16 +446,24 @@ Add this to `.atel/policy.json`. Agents who know your DID can still send tasks d
 
 ### Progressive Trust Levels
 
-ATEL automatically assigns trust levels based on interaction history:
+ATEL uses a unified trust score (0-100) with levels derived from the score:
 
-| Level | Name | Requirements | Max Risk |
-|-------|------|-------------|----------|
-| 0 | Zero Trust | New agent, no history | low |
-| 1 | Basic Trust | 3+ tasks, 70%+ success | medium |
-| 2 | Verified Trust | 10+ tasks, 90%+ success, 50%+ verified proofs | high |
-| 3 | Enterprise Trust | 20+ tasks, 95%+ success, 80%+ verified proofs | critical |
+Score formula:
+- Success rate: successRate * 40 (max 40)
+- Task volume: min(tasks/20, 1) * 25 (max 25, needs 20+ tasks for full credit)
+- Verified proofs: verifiedRatio * 25 (max 25, on-chain proof is critical)
+- Chain bonus: +10 if any on-chain verified proof exists
 
-Trust levels are enforced automatically. A Level 0 agent cannot send high-risk tasks even if the score threshold is met. Levels upgrade automatically as interaction history grows.
+| Level | Name | Score Range | Max Risk |
+|-------|------|------------|----------|
+| 0 | Zero Trust | < 30 | low |
+| 1 | Basic Trust | 30-59 | medium |
+| 2 | Verified Trust | 60-84 | high |
+| 3 | Enterprise Trust | >= 85 | critical |
+
+Key insight: without on-chain verified proofs, an agent can never reach Level 2 regardless of task count. Chain evidence is the foundation of trust.
+
+Trust levels are enforced automatically. Both score threshold AND level cap must pass for a task to proceed.
 
 ### Human in the Loop (Agent Guidance)
 
