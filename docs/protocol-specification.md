@@ -350,6 +350,11 @@ The initiator sends a `handshake_init` message:
 | `challenge` | string | REQUIRED | Random hex string (default 32 bytes = 64 hex chars) |
 | `capabilities` | string[] | OPTIONAL | Initiator's capability types |
 | `wallets` | object | OPTIONAL | Wallet addresses `{solana?, base?, bsc?}` |
+| `walletBundle` | object | OPTIONAL | DID-signed wallet proof (v0.8.3+) |
+
+The `walletBundle` object contains:
+- `addresses`: `{solana?, base?, bsc?}` — wallet addresses
+- `proof`: Ed25519 signature of canonical JSON of `addresses`, signed with DID secret key
 
 **Requirements**:
 - The `publicKey` MUST match the public key embedded in the `did`.
@@ -376,6 +381,7 @@ The responder verifies the init message and responds:
 | `challengeResponse` | string | REQUIRED | `Ed25519_sign(initiator_challenge, responder_sk)` |
 | `capabilities` | string[] | OPTIONAL | Responder's capability types |
 | `wallets` | object | OPTIONAL | Wallet addresses `{solana?, base?, bsc?}` |
+| `walletBundle` | object | OPTIONAL | DID-signed wallet proof (v0.8.3+) |
 
 **Requirements**:
 - The `challengeResponse` MUST be the Ed25519 signature of the initiator's
@@ -449,16 +455,44 @@ Upon successful handshake, both parties create a Session:
 3. Decrypt: `plaintext = secretbox.open(ciphertext, nonce, sharedKey)`.
 4. If decryption fails, throw `CryptoError`.
 
-### 4.8 Wallet Exchange
+### 4.8 Wallet Exchange & DID-Signed Verification
 
 During handshake, agents MAY exchange wallet addresses for on-chain trust
-verification. Supported chains:
+verification. Starting from v0.8.3, wallet addresses are accompanied by a
+DID signature proving ownership.
+
+**Supported chains:**
 
 | Field | Format | Example |
 |-------|--------|---------|
 | `solana` | Base58 public key | `7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU` |
 | `base` | Hex EVM address | `0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18` |
 | `bsc` | Hex EVM address | `0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18` |
+
+**WalletBundle format:**
+
+```json
+{
+  "addresses": { "solana": "<addr>", "base": "<addr>" },
+  "proof": "<base64_ed25519_signature>"
+}
+```
+
+**Signing process:**
+1. Collect non-empty wallet addresses into a clean object.
+2. Serialize using canonical JSON (sorted keys).
+3. Sign with DID Ed25519 secret key: `proof = Ed25519_sign(canonical_json, sk)`.
+
+**Verification process:**
+1. Extract `walletBundle` from handshake message.
+2. Reconstruct canonical JSON from `addresses`.
+3. Verify: `Ed25519_verify(canonical_json, proof, remote_public_key)`.
+4. If valid: `session.remoteWalletsVerified = true`.
+
+**Security properties:**
+- Wallet-DID binding is cryptographically unforgeable.
+- Even if Registry is compromised, wallet ownership proofs remain valid.
+- On-chain queries use public RPCs, no centralized dependency.
 
 Wallet addresses enable the verifier to query on-chain anchor transactions
 directly, without relying on the agent's self-reported data.
