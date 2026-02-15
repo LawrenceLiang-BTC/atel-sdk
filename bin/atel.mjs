@@ -1283,7 +1283,8 @@ async function signedFetch(method, path, payload = {}) {
   const signable = serializePayload({ payload, did: id.did, timestamp: ts });
   const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
   const body = JSON.stringify({ did: id.did, payload, timestamp: ts, signature: sig });
-  const res = await fetch(`${PLATFORM_URL}${path}`, { method, headers: { 'Content-Type': 'application/json' }, body });
+  // Always use POST for signed requests (DIDAuth reads body, GET cannot have body)
+  const res = await fetch(`${PLATFORM_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
