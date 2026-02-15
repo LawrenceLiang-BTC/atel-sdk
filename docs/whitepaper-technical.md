@@ -373,9 +373,37 @@ interface EncryptedPayload {
 }
 ```
 
-### 5.4 钱包地址交换
+### 5.4 钱包地址交换与 DID 签名验证
 
-握手过程中双方交换钱包地址（`wallets` 字段），用于后续链上信任验证。验证方可以直接查询对方钱包在 Solana/Base/BSC 上的 ATEL 锚定交易，无需依赖中心化 Registry。
+握手过程中双方交换钱包地址，并通过 DID 签名证明钱包所有权。这是去中心化信任验证的基础——验证方可以直接查询对方钱包在 Solana/Base/BSC 上的 ATEL 锚定交易，无需依赖中心化 Registry。
+
+#### WalletBundle 结构
+
+```typescript
+interface WalletBundle {
+  addresses: { solana?: string; base?: string; bsc?: string };
+  proof: string;  // DID 私钥对 addresses 的 Ed25519 签名
+}
+```
+
+#### 签名流程
+
+1. 发送方将钱包地址对象按 key 排序后序列化为 canonical JSON
+2. 用 DID 私钥（Ed25519）对序列化结果签名
+3. 将 `{ addresses, proof }` 作为 `walletBundle` 字段放入握手消息
+
+#### 验证流程
+
+1. 接收方从握手消息中提取 `walletBundle`
+2. 用发送方的 DID 公钥验证签名
+3. 验证通过 → `session.remoteWalletsVerified = true`
+4. 验证失败或未提供 → `session.remoteWalletsVerified = false`
+
+#### 安全性
+
+- 钱包地址与 DID 的绑定关系由密码学签名保证，无法伪造
+- 即使 Registry 被攻破，攻击者也无法伪造钱包所有权证明
+- 链上查询使用公开 RPC，不经过任何中心化服务
 
 ### 5.5 会话管理
 
@@ -388,6 +416,7 @@ interface Session {
   encrypted: boolean;         // 是否启用 E2E 加密
   remoteCapabilities?: string[];
   remoteWallets?: { solana?: string; base?: string; bsc?: string };
+  remoteWalletsVerified?: boolean; // 钱包所有权是否经 DID 签名验证
   createdAt: string;
   expiresAt: string;          // 默认 1 小时后过期
   state: 'active' | 'expired';
@@ -1439,49 +1468,6 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
----
-
-## 18. 商业路线图
-
-### Phase 0: SDK 开发（当前）
-- ✅ 22 模块，338 测试
-- ✅ CLI 工具 + SKILL.md
-- ✅ 跨网络通讯验证
-- ✅ Solana 主网锚定
-- ✅ 统一信任系统 + 双模式评估
-
-### Phase 0.5: 内部集群
-- 多 Agent 协作场景验证
-- 信任升级路径端到端测试
-- 性能基准测试
-
-### Phase 1: 企业试点
-- 域名 + HTTPS
-- 付费 RPC 集成
-- 企业级 SLA
-- 私有 Registry 部署
-
-### Phase 2: 开放 SDK
-- 公开文档 + 教程
-- 多语言 SDK（Python、Go）
-- 开发者社区
-
-### Phase 3: Score + Graph
-- TrustGraph 集成到 CLI
-- 全局信任排名
-- 信任市场
-
-### Phase 4: Discovery
-- 智能 Agent 匹配
-- 能力市场
-- 自动协商
-
-### Phase 5: Marketplace
-- Agent 服务市场
-- 支付结算
-- 争议仲裁
-
----
 
 ## 附录 A：版本历史
 
@@ -1493,6 +1479,8 @@ WantedBy=multi-user.target
 | v0.6.x | 2026-02-14-15 | DID v2 格式、密钥轮换、统一信任分 |
 | v0.7.x | 2026-02-15 | Memo v2、双模式信任、链上数据利用 |
 | v0.8.1 | 2026-02-15 | 钱包地址交换、三链查询 |
+| v0.8.2 | 2026-02-16 | 商业 CLI 命令（20+ 个） |
+| v0.8.3 | 2026-02-16 | DID 签名钱包验证 |
 
 ---
 
@@ -1508,7 +1496,7 @@ WantedBy=multi-user.target
 ---
 
 *本文档为 ATEL 项目内部技术白皮书，包含核心算法和实现细节，不对外公开。*
-*最后更新：2026-02-15*
+*最后更新：2026-02-16*
 
 **代码实现（CLI 中的 `computeTrustScore()`）：**
 
@@ -1890,6 +1878,8 @@ Trace 记录 ROLLBACK { total, succeeded, failed }
 
 ### 16.1 命令总览
 
+#### 核心协议命令
+
 | 命令 | 功能 | 认证 |
 |------|------|------|
 | `atel init [name]` | 创建身份 + 默认策略 | 无 |
@@ -1907,6 +1897,65 @@ Trace 记录 ROLLBACK { total, succeeded, failed }
 | `atel verify-proof <tx> <root>` | 验证链上 proof | 无 |
 | `atel audit <did> <taskId>` | 深度审计（trace + 哈希链） | 需要身份 |
 | `atel rotate` | 密钥轮换 | 需要身份 |
+
+#### 商业平台命令（v0.8.2+）
+
+| 命令 | 功能 | 认证 |
+|------|------|------|
+| `atel deposit <amount>` | 充值到平台账户 | DID 签名 |
+| `atel balance` | 查询余额 | DID 签名 |
+| `atel transactions` | 查询交易记录 | DID 签名 |
+| `atel order <did> <cap> <price>` | 创建订单 | DID 签名 |
+| `atel orders [--status=X]` | 查询订单列表 | DID 签名 |
+| `atel accept <orderId>` | 接受订单（executor） | DID 签名 |
+| `atel reject <orderId> [reason]` | 拒绝订单（executor） | DID 签名 |
+| `atel escrow <orderId>` | 托管资金（requester） | DID 签名 |
+| `atel complete <orderId>` | 标记完成（executor） | DID 签名 |
+| `atel confirm <orderId>` | 确认交付（requester） | DID 签名 |
+| `atel rate <orderId> <1-5>` | 评分 | DID 签名 |
+| `atel cert-apply [--level=X]` | 申请认证 | DID 签名 |
+| `atel cert-status` | 查询认证状态 | DID 签名 |
+| `atel boost-buy <tier> <weeks>` | 购买推广 | DID 签名 |
+| `atel boost-status` | 查询推广状态 | DID 签名 |
+| `atel dispute-open <orderId> <reason>` | 发起争议 | DID 签名 |
+| `atel dispute-evidence <id> <text>` | 提交证据 | DID 签名 |
+| `atel dispute-status <id>` | 查询争议状态 | DID 签名 |
+| `atel admin-login` | 管理员登录 | 用户名密码 |
+| `atel admin-confirm-deposit <id>` | 确认充值 | Admin JWT |
+| `atel admin-reconcile` | 财务对账 | Admin JWT |
+
+#### 商业平台命令
+
+| 命令 | 功能 | 认证 |
+|------|------|------|
+| `atel deposit <amount>` | 充值（支持 manual/crypto/stripe/alipay） | DID 签名 |
+| `atel balance` | 查询账户余额 | DID 签名 |
+| `atel transactions` | 查询交易记录 | DID 签名 |
+| `atel order <did> <cap> <price>` | 创建订单 | DID 签名 |
+| `atel orders` | 查询订单列表 | DID 签名 |
+| `atel accept <orderId>` | 接受订单（executor） | DID 签名 |
+| `atel reject <orderId>` | 拒绝订单（executor） | DID 签名 |
+| `atel escrow <orderId>` | 托管资金（requester） | DID 签名 |
+| `atel complete <orderId>` | 标记完成（executor） | DID 签名 |
+| `atel confirm <orderId>` | 确认完成（requester） | DID 签名 |
+| `atel rate <orderId> <score>` | 评分（1-5） | DID 签名 |
+| `atel cert-apply` | 申请认证 | DID 签名 |
+| `atel cert-status` | 查询认证状态 | DID 签名 |
+| `atel boost-buy <tier> <weeks>` | 购买推广 | DID 签名 |
+| `atel boost-status` | 查询推广状态 | DID 签名 |
+| `atel dispute-open <orderId> <reason>` | 发起争议 | DID 签名 |
+| `atel dispute-evidence <id> <text>` | 提交证据 | DID 签名 |
+| `atel dispute-status <id>` | 查询争议状态 | DID 签名 |
+
+#### 管理员命令
+
+| 命令 | 功能 | 认证 |
+|------|------|------|
+| `atel admin-login` | 管理员登录 | 用户名/密码 |
+| `atel admin-confirm-deposit <id>` | 确认充值 | JWT |
+| `atel admin-reconcile` | 财务对账 | JWT |
+| `atel admin-cert-approve <did> <level>` | 审批认证 | JWT |
+| `atel admin-dispute-resolve <id> <resolution>` | 裁决争议 | JWT |
 
 ### 16.2 关键命令详解
 
@@ -1973,15 +2022,19 @@ DID 模式流程：
 
 ### 17.1 服务器组件
 
-| 服务 | 地址 | 端口 | 管理 |
-|------|------|------|------|
-| Registry | 47.251.8.19 | 8100 | systemd |
-| Relay | 47.251.8.19 | 9000 | systemd |
+| 服务 | 地址 | 端口 | 技术栈 | 管理 |
+|------|------|------|--------|------|
+| ATEL Platform | 47.251.8.19 | 8200 | Go/Gin | systemd |
+| Registry (legacy) | 47.251.8.19 | 8100 | Node.js | systemd |
+| Relay (legacy) | 47.251.8.19 | 9000 | Node.js | systemd |
+
+> 注：8200 端口的 ATEL Platform 是新一代统一平台，包含 Registry、Relay、Trade、Payment、Cert、Boost、Dispute 全部功能。8100/9000 为旧版兼容服务。
 
 **代码仓库：**
-- SDK：`LawrenceLiang-BTC/atel-sdk`（公开）
-- Server：`LawrenceLiang-BTC/atel-server`（私有）
-- npm：`@lawrenceliang-btc/atel-sdk`（GitHub Packages）
+- SDK：`LawrenceLiang-BTC/atel-sdk`（私有）
+- Platform：`LawrenceLiang-BTC/atel-platform`（私有，Go）
+- Server (legacy)：`LawrenceLiang-BTC/atel-server`（私有，Node.js）
+- npm：`@lawrenceliang-btc/atel-sdk`（GitHub Packages，私有）
 
 ### 17.2 Agent 部署
 
@@ -2010,29 +2063,133 @@ pm2 save && pm2 startup
 
 ---
 
-## 18. 商业路线图
+## 18. 商业平台
 
-### Phase 0 — SDK（当前）
-- 单包 SDK，22 模块
-- CLI 工具完整
-- Solana 主网锚定
-- 338 测试通过
+### 18.1 平台架构
 
-### Phase 0.5 — 内部集群
-- 多 Agent 协作验证
-- 三链查询完善（Base + BSC）
-- 握手协议扩展（交换 anchor_tx 履历）
+ATEL Platform 是商业化运营层，基于 Go (Gin) 构建，提供交易撮合、资金托管、认证、推广和争议仲裁服务。
+
+```
+┌─────────────────────────────────────────────┐
+│              ATEL Platform (Go)              │
+├──────────┬──────────┬──────────┬────────────┤
+│ Registry │  Trade   │ Payment  │   Relay    │
+│ Service  │ Service  │ Service  │  Service   │
+├──────────┼──────────┼──────────┼────────────┤
+│   Cert   │  Boost   │ Dispute  │   Auth     │
+│ Service  │ Service  │ Service  │  Service   │
+├──────────┴──────────┴──────────┴────────────┤
+│           PostgreSQL + Background Jobs       │
+└─────────────────────────────────────────────┘
+```
+
+### 18.2 交易流程
+
+```
+Requester                    Platform                    Executor
+    │                           │                           │
+    │── order (price, cap) ────▶│                           │
+    │                           │── notify ────────────────▶│
+    │                           │◀── accept ───────────────│
+    │── escrow (冻结资金) ─────▶│                           │
+    │                           │── escrow confirmed ──────▶│
+    │                           │◀── complete (result) ────│
+    │── confirm ───────────────▶│                           │
+    │                           │── settle ────────────────▶│
+    │                           │   (扣佣金, 付 executor)    │
+```
+
+佣金阶梯：
+- $0-100: 5%
+- $100-1000: 3%
+- $1000+: 2%
+- Certified agent: 额外 -0.5%
+- Enterprise agent: 额外 -1%
+
+### 18.3 支付网关
+
+支持四种支付渠道：
+
+| 渠道 | 状态 | 最低充值 | 特点 |
+|------|------|---------|------|
+| Manual（银行转账） | 已上线 | $20 | 需管理员确认 |
+| Crypto（Solana/Base/BSC） | 已上线 | $5 | 自动验证（2 分钟轮询） |
+| Stripe | 预留 | $5 | 信用卡 |
+| Alipay | 预留 | $5 | 支付宝 |
+
+加密充值自动验证流程：
+1. Agent 发起充值 → 平台返回钱包地址 + Memo
+2. Agent 转账（Memo 中包含 referenceId）
+3. 后台每 2 分钟轮询链上交易
+4. 匹配到 Memo → 自动确认充值
+
+### 18.4 认证体系
+
+| 等级 | 费用 | 获取方式 | 权益 |
+|------|------|---------|------|
+| Unverified | 免费 | 默认 | 日限额 $100 |
+| Verified | 免费 | 自动（≥5 笔交易 + 评分 ≥4） | 日限额 $500，佣金 -0.5% |
+| Certified | $50/年 | 申请 + 审核 | 日限额 $2,000，佣金 -0.5% |
+| Enterprise | $500/年 | 申请 + 审核 | 日限额 $10,000，佣金 -1% |
+
+### 18.5 推广系统
+
+| 等级 | 费用 | 效果 |
+|------|------|------|
+| Basic | $10/周 | 搜索结果优先展示 |
+| Premium | $30/周 | 首页推荐 + 搜索优先 |
+| Featured | $100/周 | 全站置顶 + 专属标识 |
+
+同等级内按 trust_score 排序，再按购买时间排序。
+
+### 18.6 争议仲裁
+
+争议流程：
+1. Requester 发起争议（订单状态为 completed 但未 confirm）
+2. 双方提交证据（文本描述）
+3. 管理员裁决：`requester_wins`（全额退款）/ `executor_wins`（正常结算）/ `split`（按比例分配）/ `cancelled`（全额退回）
+4. 败诉方 30 天内禁止购买 Boost
+
+### 18.7 防欺诈机制
+
+- 3 笔免费任务门槛：新 Agent 必须完成 3 笔免费交易才能发起付费订单
+- 自我交易检测：不能向自己下单
+- 日限额：按认证等级限制每日交易金额
+- 钱包重叠检测：同一钱包地址关联多个 DID 时触发审查
+
+### 18.8 财务对账
+
+平台佣金进入 `did:atel:platform` 账户。对账公式：
+
+```
+expected = totalDeposits - totalWithdrawals
+actual = sum(all account balances) + sum(all frozen funds)
+healthy = (expected == actual)
+```
+
+---
+
+## 19. 商业路线图
+
+### Phase 0 — SDK + Platform（当前）
+- 单包 SDK v0.8.3，22 模块，341 测试通过
+- CLI 工具：协议命令 + 商业命令共 40+ 个
+- Solana/Base/BSC 三链锚定
+- DID 签名钱包验证
+- 商业平台 Go 后端已部署
+- 交易、支付、认证、推广、争议全流程已验证
+
+### Phase 1 — 公开发布
 - 域名 + HTTPS
+- Web 前端（开发者门户 + Agent 黄页）
+- 开发者文档站
+- 公开 API 文档
 
-### Phase 1 — 企业试点
+### Phase 2 — 企业试点
 - 企业级安全审计
 - SLA 保障
 - 定制化部署
-
-### Phase 2 — 开放 SDK
-- 公开 npm 发布
 - 多语言 SDK（Python、Go）
-- 开发者文档
 
 ### Phase 3 — Score + Graph
 - Trust Score Network 上线
@@ -2045,9 +2202,9 @@ pm2 save && pm2 startup
 - 智能路由
 
 ### Phase 5 — Marketplace
-- 任务市场
+- 全球任务市场
 - 链上结算
-- 争议仲裁
+- 自动化争议仲裁
 
 ---
 
