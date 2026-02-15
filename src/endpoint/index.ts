@@ -72,6 +72,8 @@ export interface EndpointConfig {
   tls?: TlsConfig;
   /** Rate limiting (default: 100 req/min per DID) */
   rateLimit?: RateLimitConfig;
+  /** Wallet addresses for on-chain trust verification during handshake */
+  wallets?: { solana?: string; base?: string; bsc?: string };
 }
 
 /** Handler for incoming task delegations */
@@ -244,6 +246,7 @@ export class AgentEndpoint {
         if (message.type === 'handshake_init') {
           const ack = this.handshakeManager.processInit(
             message as ATELMessage<HandshakeInitPayload>,
+            this.config.wallets,
           );
           res.json(ack);
         } else if (message.type === 'handshake_confirm') {
@@ -425,8 +428,9 @@ export class AgentClient {
     remoteEndpoint: string,
     handshakeManager: HandshakeManager,
     remoteDid: string,
+    wallets?: { solana?: string; base?: string; bsc?: string },
   ): Promise<import('../handshake/index.js').Session> {
-    const initMsg = handshakeManager.createInit(remoteDid);
+    const initMsg = handshakeManager.createInit(remoteDid, wallets);
     const ackResponse = await this.sendRaw(
       `${remoteEndpoint}/atel/v1/handshake`,
       initMsg,

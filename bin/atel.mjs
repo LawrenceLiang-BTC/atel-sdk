@@ -757,10 +757,11 @@ async function cmdHandshake(remoteEndpoint, remoteDid) {
   const id = requireIdentity();
   const client = new AgentClient(id);
   const hsManager = new HandshakeManager(id);
+  const wallets = await getWalletAddresses();
   let did = remoteDid;
   if (!did) { const h = await client.health(remoteEndpoint); did = h.did; }
-  const session = await client.handshake(remoteEndpoint, hsManager, did);
-  console.log(JSON.stringify({ status: 'handshake_complete', sessionId: session.sessionId, remoteDid: did, encrypted: session.encrypted }, null, 2));
+  const session = await client.handshake(remoteEndpoint, hsManager, did, wallets);
+  console.log(JSON.stringify({ status: 'handshake_complete', sessionId: session.sessionId, remoteDid: did, encrypted: session.encrypted, remoteWalletsVerified: session.remoteWalletsVerified, remoteWallets: session.remoteWallets }, null, 2));
   const sf = resolve(ATEL_DIR, 'sessions.json');
   let sessions = {}; if (existsSync(sf)) sessions = JSON.parse(readFileSync(sf, 'utf-8'));
   sessions[remoteEndpoint] = { did, sessionId: session.sessionId, encrypted: session.encrypted };

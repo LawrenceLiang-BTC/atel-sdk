@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { AgentIdentity } from '../src/identity/index.js';
-import { HandshakeManager } from '../src/handshake/index.js';
+import { HandshakeManager, createWalletBundle, verifyWalletBundle } from '../src/handshake/index.js';
 
 describe('Handshake Protocol', () => {
   const alice = new AgentIdentity({ agent_id: 'alice' });
@@ -119,5 +119,49 @@ describe('Handshake Protocol', () => {
     // Session should work but not be encrypted
     expect(aliceSession.state).toBe('active');
     expect(aliceSession.encrypted).toBe(false);
+  });
+
+  describe('wallet bundle verification', () => {
+    it('should verify wallet ownership via DID signature', () => {
+      const aliceWallets = { solana: 'ALiCe1234567890abcdef', base: '0xAlice1234' };
+      const bobWallets = { solana: 'BoB1234567890abcdef', bsc: '0xBob5678' };
+
+      const aliceHs = new HandshakeManager(alice);
+      const bobHs = new HandshakeManager(bob);
+
+      const initMsg = aliceHs.createInit(bob.did, aliceWallets);
+      expect(initMsg.payload.walletBundle).toBeDefined();
+      expect(initMsg.payload.walletBundle!.proof).toBeTruthy();
+
+      const ackMsg = bobHs.processInit(initMsg, bobWallets);
+      expect(ackMsg.payload.walletBundle).toBeDefined();
+
+      const { session: aliceSession } = aliceHs.processAck(ackMsg);
+      expect(aliceSession.remoteWallets).toEqual(bobWallets);
+      expect(aliceSession.remoteWalletsVerified).toBe(true);
+    });
+
+    it('should detect tampered wallet addresses', () => {
+      const wallets = { solana: 'MyRealWallet123' };
+      const bundle = createWalletBundle(wallets, alice.secretKey);
+
+      // Tamper with the address
+      const tampered = { ...bundle, addresses: { solana: 'FakeWallet999' } };
+      expect(verifyWalletBundle(tampered, alice.publicKey)).toBe(false);
+
+      // Original should verify
+      expect(verifyWalletBundle(bundle, alice.publicKey)).toBe(true);
+    });
+
+    it('should set remoteWalletsVerified=false when no bundle provided', () => {
+      const aliceHs = new HandshakeManager(alice);
+      const bobHs = new HandshakeManager(bob);
+
+      const initMsg = aliceHs.createInit(bob.did); // no wallets
+      const ackMsg = bobHs.processInit(initMsg);
+      const { session } = aliceHs.processAck(ackMsg);
+
+      expect(session.remoteWalletsVerified).toBe(false);
+    });
   });
 });
