@@ -13,7 +13,7 @@
 
 import { randomUUID, randomBytes } from 'node:crypto';
 import type { AgentIdentity } from '../identity/index.js';
-import { verify, parseDID } from '../identity/index.js';
+import { verify, sign as didSign, parseDID } from '../identity/index.js';
 import {
   createMessage,
   verifyMessage,
@@ -28,6 +28,13 @@ import {
 
 // ─── Types ───────────────────────────────────────────────────────
 
+/** Wallet addresses with DID-signed proof of ownership */
+export interface WalletBundle {
+  addresses: { solana?: string; base?: string; bsc?: string };
+  /** DID signature over sorted JSON of addresses — proves ownership */
+  proof: string;
+}
+
 /** Handshake init payload */
 export interface HandshakeInitPayload {
   did: string;
@@ -37,6 +44,8 @@ export interface HandshakeInitPayload {
   capabilities?: string[];
   /** Wallet addresses for on-chain trust verification */
   wallets?: { solana?: string; base?: string; bsc?: string };
+  /** Signed wallet bundle (v0.8.3+) */
+  walletBundle?: WalletBundle;
 }
 
 /** Handshake ack payload */
@@ -49,6 +58,8 @@ export interface HandshakeAckPayload {
   capabilities?: string[];
   /** Wallet addresses for on-chain trust verification */
   wallets?: { solana?: string; base?: string; bsc?: string };
+  /** Signed wallet bundle (v0.8.3+) */
+  walletBundle?: WalletBundle;
 }
 
 /** Handshake confirm payload */
@@ -72,6 +83,8 @@ export interface Session {
   remoteCapabilities?: string[];
   /** Remote agent's wallet addresses (if provided) */
   remoteWallets?: { solana?: string; base?: string; bsc?: string };
+  /** Whether remote wallet ownership is DID-verified */
+  remoteWalletsVerified?: boolean;
   /** Session creation timestamp */
   createdAt: string;
   /** Session expiry timestamp */
@@ -99,6 +112,35 @@ export class HandshakeError extends Error {
   }
 }
 
+// ─── Wallet Proof Helpers ─────────────────────────────────────────
+
+/** Create a signed wallet bundle proving DID ownership of wallet addresses */
+export function createWalletBundle(
+  addresses: { solana?: string; base?: string; bsc?: string },
+  secretKey: Uint8Array,
+): WalletBundle {
+  // Canonical JSON: sorted keys, no undefined values
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(addresses)) {
+    if (v) clean[k] = v;
+  }
+  const proof = didSign(clean, secretKey);
+  return { addresses: clean, proof };
+}
+
+/** Verify a wallet bundle's DID signature */
+export function verifyWalletBundle(
+  bundle: WalletBundle,
+  publicKey: Uint8Array,
+): boolean {
+  if (!bundle || !bundle.proof || !bundle.addresses) return false;
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(bundle.addresses)) {
+    if (v) clean[k] = v;
+  }
+  return verify(clean, bundle.proof, publicKey);
+}
+
 // ─── Handshake Manager ───────────────────────────────────────────
 
 /**
@@ -115,6 +157,7 @@ export class HandshakeManager {
   private readonly sessions: Map<string, Session> = new Map();
   private readonly pendingChallenges: Map<string, string> = new Map();
   private readonly pendingEncKeys: Map<string, EncryptionKeyPair> = new Map();
+  private readonly pendingInitPayloads: Map<string, HandshakeInitPayload> = new Map();
 
   /** Encryption manager for E2E encrypted communication */
   readonly encryption: EncryptionManager;
@@ -140,6 +183,9 @@ export class HandshakeManager {
     const encKeyPair = generateEncryptionKeyPair();
     this.pendingEncKeys.set(remoteDid, encKeyPair);
 
+    // Sign wallet addresses if provided
+    const walletBundle = wallets ? createWalletBundle(wallets, this.identity.secretKey) : undefined;
+
     return createMessage<HandshakeInitPayload>({
       type: 'handshake_init',
       from: this.identity.did,
@@ -150,6 +196,7 @@ export class HandshakeManager {
         encPublicKey: Buffer.from(encKeyPair.publicKey).toString('base64'),
         challenge,
         wallets,
+        walletBundle,
       },
       secretKey: this.identity.secretKey,
     });
@@ -213,7 +260,7 @@ export class HandshakeManager {
       secretKey: this.identity.secretKey,
     });
 
-    const session = this.createSession(payload.did, remotePubKey, encrypted, payload.capabilities, payload.wallets);
+    const session = this.createSession(payload.did, remotePubKey, encrypted, payload.capabilities, payload.wallets, payload.walletBundle);
 
     return { confirm, session };
   }
@@ -242,6 +289,7 @@ export class HandshakeManager {
     // Generate our challenge
     const ourChallenge = randomBytes(this.challengeBytes).toString('hex');
     this.pendingChallenges.set(payload.did, ourChallenge);
+    this.pendingInitPayloads.set(payload.did, payload);
 
     // Generate ephemeral X25519 key pair and set up encryption
     const encKeyPair = generateEncryptionKeyPair();
@@ -254,6 +302,9 @@ export class HandshakeManager {
     // Sign their challenge
     const challengeResponse = this.identity.sign(payload.challenge);
 
+    // Sign wallet addresses if provided
+    const walletBundle = wallets ? createWalletBundle(wallets, this.identity.secretKey) : undefined;
+
     return createMessage<HandshakeAckPayload>({
       type: 'handshake_ack',
       from: this.identity.did,
@@ -265,6 +316,7 @@ export class HandshakeManager {
         challenge: ourChallenge,
         challengeResponse,
         wallets,
+        walletBundle,
       },
       secretKey: this.identity.secretKey,
     });
@@ -278,6 +330,7 @@ export class HandshakeManager {
     initiatorPublicKey: Uint8Array,
     initiatorCapabilities?: string[],
     initiatorWallets?: { solana?: string; base?: string; bsc?: string },
+    initiatorWalletBundle?: WalletBundle,
   ): Session {
     const payload = confirmMessage.payload;
 
@@ -297,8 +350,15 @@ export class HandshakeManager {
 
     this.pendingChallenges.delete(confirmMessage.from);
 
+    // Use stored init payload if explicit params not provided
+    const storedInit = this.pendingInitPayloads.get(confirmMessage.from);
+    this.pendingInitPayloads.delete(confirmMessage.from);
+    const caps = initiatorCapabilities ?? storedInit?.capabilities;
+    const wallets = initiatorWallets ?? storedInit?.wallets;
+    const bundle = initiatorWalletBundle ?? storedInit?.walletBundle;
+
     const encrypted = this.encryption.hasSession(confirmMessage.from);
-    return this.createSession(confirmMessage.from, initiatorPublicKey, encrypted, initiatorCapabilities, initiatorWallets);
+    return this.createSession(confirmMessage.from, initiatorPublicKey, encrypted, caps, wallets, bundle);
   }
 
   // ── Session Management ───────────────────────────────────────
@@ -349,9 +409,21 @@ export class HandshakeManager {
     encrypted: boolean,
     remoteCapabilities?: string[],
     remoteWallets?: { solana?: string; base?: string; bsc?: string },
+    remoteWalletBundle?: WalletBundle,
   ): Session {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.sessionTtlSec * 1000);
+
+    // Verify wallet bundle if provided — cryptographic proof of ownership
+    let walletsVerified = false;
+    let finalWallets = remoteWallets;
+    if (remoteWalletBundle) {
+      walletsVerified = verifyWalletBundle(remoteWalletBundle, remotePublicKey);
+      if (walletsVerified) {
+        // Use addresses from verified bundle (authoritative)
+        finalWallets = remoteWalletBundle.addresses;
+      }
+    }
 
     const session: Session = {
       sessionId: randomUUID(),
@@ -360,7 +432,8 @@ export class HandshakeManager {
       remotePublicKey,
       encrypted,
       remoteCapabilities,
-      remoteWallets,
+      remoteWallets: finalWallets,
+      remoteWalletsVerified: walletsVerified,
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       state: 'active',
