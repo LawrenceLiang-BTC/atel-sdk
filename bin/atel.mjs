@@ -3,7 +3,7 @@
 /**
  * ATEL CLI — Command-line interface for ATEL SDK
  *
- * Commands:
+ * Protocol Commands:
  *   atel init [name]                    Create agent identity + default policy
  *   atel info                           Show identity, capabilities, policy, network
  *   atel start [port]                   Start endpoint (auto network + auto register)
@@ -15,6 +15,33 @@
  *   atel handshake <endpoint> [did]     Handshake with a remote agent
  *   atel task <endpoint> <json>         Delegate a task to a remote agent
  *   atel result <taskId> <json>         Submit execution result (from executor)
+ *
+ * Account Commands:
+ *   atel balance                        Show platform account balance
+ *   atel deposit <amount> [channel]     Deposit funds
+ *   atel withdraw <amount> [channel]    Withdraw funds
+ *   atel transactions                   List payment history
+ *
+ * Trade Commands:
+ *   atel order <did> <cap> <price>      Create a trade order
+ *   atel accept <orderId>               Accept an order (executor)
+ *   atel reject <orderId>               Reject an order (executor)
+ *   atel escrow <orderId>               Freeze funds for order (requester)
+ *   atel complete <orderId> [taskId]    Mark order complete (executor)
+ *   atel confirm <orderId>              Confirm delivery + settle (requester)
+ *   atel rate <orderId> <1-5> [comment] Rate the other party
+ *   atel orders [role] [status]         List orders
+ *
+ * Dispute Commands:
+ *   atel dispute <orderId> <reason>     Open a dispute
+ *   atel evidence <disputeId> <json>    Submit dispute evidence
+ *   atel disputes                       List your disputes
+ *
+ * Certification & Boost Commands:
+ *   atel cert-apply [level]             Apply for certification
+ *   atel cert-status [did]              Check certification status
+ *   atel boost <tier> <weeks>           Purchase boost
+ *   atel boost-status [did]             Check boost status
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
@@ -1244,6 +1271,199 @@ async function cmdRotate() {
   }, null, 2));
 }
 
+// ─── Platform API Helpers ────────────────────────────────────────
+
+const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_REGISTRY || 'http://47.251.8.19:8100';
+
+async function signedFetch(method, path, payload = {}) {
+  const id = requireIdentity();
+  const { default: nacl } = await import('tweetnacl');
+  const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
+  const ts = new Date().toISOString();
+  const signable = serializePayload({ payload, did: id.did, timestamp: ts });
+  const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+  const body = JSON.stringify({ did: id.did, payload, timestamp: ts, signature: sig });
+  const res = await fetch(`${PLATFORM_URL}${path}`, { method, headers: { 'Content-Type': 'application/json' }, body });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+// ─── Account Commands ────────────────────────────────────────────
+
+async function cmdBalance() {
+  const data = await signedFetch('GET', '/account/v1/balance');
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdDeposit(amount, channel) {
+  if (!amount || isNaN(amount)) { console.error('Usage: atel deposit <amount> [channel]'); process.exit(1); }
+  const data = await signedFetch('POST', '/account/v1/deposit', { amount: parseFloat(amount), channel: channel || 'manual' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdWithdraw(amount, channel) {
+  if (!amount || isNaN(amount)) { console.error('Usage: atel withdraw <amount> [channel]'); process.exit(1); }
+  const data = await signedFetch('POST', '/account/v1/withdraw', { amount: parseFloat(amount), channel: channel || 'manual' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdTransactions() {
+  const data = await signedFetch('GET', '/account/v1/transactions');
+  console.log(JSON.stringify(data, null, 2));
+}
+
+// ─── Trade Commands ──────────────────────────────────────────────
+
+async function cmdOrder(executorDid, capType, price) {
+  if (!executorDid || !capType || !price) { console.error('Usage: atel order <executorDid> <capabilityType> <price> [currency]'); process.exit(1); }
+  const data = await signedFetch('POST', '/trade/v1/order', {
+    executorDid, capabilityType: capType, priceAmount: parseFloat(price), priceCurrency: 'USD', pricingModel: 'per_task',
+  });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOrderInfo(orderId) {
+  if (!orderId) { console.error('Usage: atel order-info <orderId>'); process.exit(1); }
+  const res = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdAccept(orderId) {
+  if (!orderId) { console.error('Usage: atel accept <orderId>'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/accept`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdReject(orderId) {
+  if (!orderId) { console.error('Usage: atel reject <orderId>'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/reject`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdEscrow(orderId) {
+  if (!orderId) { console.error('Usage: atel escrow <orderId>'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/escrow`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdComplete(orderId, taskId) {
+  if (!orderId) { console.error('Usage: atel complete <orderId> [taskId] [--proof]'); process.exit(1); }
+  const payload = {};
+  if (taskId) payload.taskId = taskId;
+  // Auto-attach proof if trace exists for this task
+  if (taskId) {
+    const traceData = loadTrace(taskId);
+    if (traceData) {
+      try {
+        const lines = traceData.trim().split('\n').map(l => JSON.parse(l));
+        const proofLine = lines.find(l => l.proof_id);
+        if (proofLine) payload.proofBundle = proofLine;
+        const anchorLine = lines.find(l => l.anchor_tx);
+        if (anchorLine) { payload.anchorTx = anchorLine.anchor_tx; payload.traceRoot = anchorLine.trace_root; }
+      } catch {}
+    }
+  }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/complete`, payload);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdConfirm(orderId) {
+  if (!orderId) { console.error('Usage: atel confirm <orderId>'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/confirm`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdRate(orderId, rating, comment) {
+  if (!orderId || !rating) { console.error('Usage: atel rate <orderId> <1-5> [comment]'); process.exit(1); }
+  const r = parseInt(rating);
+  if (r < 1 || r > 5) { console.error('Rating must be 1-5'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/rate`, { rating: r, comment: comment || '' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOrders(role, status) {
+  const params = new URLSearchParams();
+  if (role) params.set('role', role);
+  if (status) params.set('status', status);
+  const qs = params.toString() ? '?' + params.toString() : '';
+  const data = await signedFetch('GET', `/trade/v1/orders${qs}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+// ─── Dispute Commands ────────────────────────────────────────────
+
+async function cmdDispute(orderId, reason, description) {
+  if (!orderId || !reason) { console.error('Usage: atel dispute <orderId> <reason> [description]\nReasons: quality, incomplete, timeout, fraud, malicious, other'); process.exit(1); }
+  const data = await signedFetch('POST', '/dispute/v1/open', { orderId, reason, description: description || '' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdEvidence(disputeId, evidenceJson) {
+  if (!disputeId || !evidenceJson) { console.error('Usage: atel evidence <disputeId> <json>'); process.exit(1); }
+  let evidence;
+  try { evidence = JSON.parse(evidenceJson); } catch { console.error('Invalid JSON'); process.exit(1); }
+  const data = await signedFetch('POST', `/dispute/v1/${disputeId}/evidence`, { evidence });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdDisputes() {
+  const data = await signedFetch('GET', '/dispute/v1/list');
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdDisputeInfo(disputeId) {
+  if (!disputeId) { console.error('Usage: atel dispute-info <disputeId>'); process.exit(1); }
+  const res = await fetch(`${PLATFORM_URL}/dispute/v1/${disputeId}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+// ─── Cert Commands ───────────────────────────────────────────────
+
+async function cmdCertApply(level) {
+  const data = await signedFetch('POST', '/cert/v1/apply', { level: level || 'certified' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdCertStatus(did) {
+  const targetDid = did || requireIdentity().did;
+  const res = await fetch(`${PLATFORM_URL}/cert/v1/status/${encodeURIComponent(targetDid)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdCertRenew(level) {
+  const data = await signedFetch('POST', '/cert/v1/renew', { level: level || 'certified' });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+// ─── Boost Commands ──────────────────────────────────────────────
+
+async function cmdBoost(tier, weeks) {
+  if (!tier || !weeks) { console.error('Usage: atel boost <tier> <weeks>\nTiers: basic ($10/wk), premium ($30/wk), featured ($100/wk)'); process.exit(1); }
+  const data = await signedFetch('POST', '/boost/v1/purchase', { tier, weeks: parseInt(weeks) });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdBoostStatus(did) {
+  const targetDid = did || requireIdentity().did;
+  const res = await fetch(`${PLATFORM_URL}/boost/v1/status/${encodeURIComponent(targetDid)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdBoostCancel(boostId) {
+  if (!boostId) { console.error('Usage: atel boost-cancel <boostId>'); process.exit(1); }
+  const data = await signedFetch('DELETE', `/boost/v1/cancel/${boostId}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
 // ─── Main ────────────────────────────────────────────────────────
 
 const [,, cmd, ...rawArgs] = process.argv;
@@ -1264,6 +1484,34 @@ const commands = {
   'verify-proof': () => cmdVerifyProof(args[0], args[1]),
   audit: () => cmdAudit(args[0], args[1]),
   rotate: () => cmdRotate(),
+  // Account
+  balance: () => cmdBalance(),
+  deposit: () => cmdDeposit(args[0], args[1]),
+  withdraw: () => cmdWithdraw(args[0], args[1]),
+  transactions: () => cmdTransactions(),
+  // Trade
+  order: () => cmdOrder(args[0], args[1], args[2]),
+  'order-info': () => cmdOrderInfo(args[0]),
+  accept: () => cmdAccept(args[0]),
+  reject: () => cmdReject(args[0]),
+  escrow: () => cmdEscrow(args[0]),
+  complete: () => cmdComplete(args[0], args[1]),
+  confirm: () => cmdConfirm(args[0]),
+  rate: () => cmdRate(args[0], args[1], args[2]),
+  orders: () => cmdOrders(args[0], args[1]),
+  // Dispute
+  dispute: () => cmdDispute(args[0], args[1], args[2]),
+  evidence: () => cmdEvidence(args[0], args[1]),
+  disputes: () => cmdDisputes(),
+  'dispute-info': () => cmdDisputeInfo(args[0]),
+  // Cert
+  'cert-apply': () => cmdCertApply(args[0]),
+  'cert-status': () => cmdCertStatus(args[0]),
+  'cert-renew': () => cmdCertRenew(args[0]),
+  // Boost
+  boost: () => cmdBoost(args[0], args[1]),
+  'boost-status': () => cmdBoostStatus(args[0]),
+  'boost-cancel': () => cmdBoostCancel(args[0]),
 };
 
 if (!cmd || !commands[cmd]) {
@@ -1271,7 +1519,7 @@ if (!cmd || !commands[cmd]) {
 
 Usage: atel <command> [args]
 
-Commands:
+Protocol Commands:
   init [name]                          Create agent identity + security policy
   info                                 Show identity, capabilities, network, policy
   setup [port]                         Configure network (detect IP, UPnP, verify)
@@ -1288,20 +1536,48 @@ Commands:
   audit <did_or_url> <taskId>          Deep audit: fetch trace + verify hash chain
   rotate                               Rotate identity key pair (backup + on-chain anchor)
 
+Account Commands:
+  balance                              Show platform account balance
+  deposit <amount> [channel]           Deposit funds (channel: manual|crypto_sol|stripe|alipay)
+  withdraw <amount> [channel]          Withdraw funds
+  transactions                         List payment history
+
+Trade Commands:
+  order <executorDid> <cap> <price>    Create a trade order
+  order-info <orderId>                 Get order details
+  accept <orderId>                     Accept an order (executor)
+  reject <orderId>                     Reject an order (executor)
+  escrow <orderId>                     Freeze funds for order (requester)
+  complete <orderId> [taskId]          Mark order complete + attach proof (executor)
+  confirm <orderId>                    Confirm delivery + settle (requester)
+  rate <orderId> <1-5> [comment]       Rate the other party
+  orders [role] [status]               List orders (role: requester|executor|all)
+
+Dispute Commands:
+  dispute <orderId> <reason> [desc]    Open a dispute (reason: quality|incomplete|timeout|fraud|malicious|other)
+  evidence <disputeId> <json>          Submit dispute evidence
+  disputes                             List your disputes
+  dispute-info <disputeId>             Get dispute details
+
+Certification Commands:
+  cert-apply [level]                   Apply for certification (level: certified|enterprise)
+  cert-status [did]                    Check certification status
+  cert-renew [level]                   Renew certification
+
+Boost Commands:
+  boost <tier> <weeks>                 Purchase boost (tier: basic|premium|featured)
+  boost-status [did]                   Check boost status
+  boost-cancel <boostId>               Cancel a boost
+
 Environment:
   ATEL_DIR                Identity directory (default: .atel)
   ATEL_REGISTRY           Registry URL (default: http://47.251.8.19:8100)
+  ATEL_PLATFORM           Platform URL (default: ATEL_REGISTRY value)
   ATEL_EXECUTOR_URL       Local executor HTTP endpoint
   ATEL_SOLANA_PRIVATE_KEY Solana key for on-chain anchoring
   ATEL_SOLANA_RPC_URL     Solana RPC (default: mainnet-beta)
   ATEL_BASE_PRIVATE_KEY   Base chain key for on-chain anchoring
-  ATEL_BASE_RPC_URL       Base RPC (default: https://mainnet.base.org)
-  ATEL_BASE_EXPLORER_API  Basescan API URL
-  ATEL_BASE_EXPLORER_KEY  Basescan API key
   ATEL_BSC_PRIVATE_KEY    BSC chain key for on-chain anchoring
-  ATEL_BSC_RPC_URL        BSC RPC (default: https://bsc-dataseed.binance.org)
-  ATEL_BSC_EXPLORER_API   BSCscan API URL
-  ATEL_BSC_EXPLORER_KEY   BSCscan API key
 
 Trust Policy: Configure .atel/policy.json trustPolicy for automatic
 pre-task trust evaluation. Use _risk in payload or --risk flag.`);
