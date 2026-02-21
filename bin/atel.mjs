@@ -57,7 +57,7 @@ import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
 const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
 const IDENTITY_FILE = resolve(ATEL_DIR, 'identity.json');
-const REGISTRY_URL = process.env.ATEL_REGISTRY || 'http://47.251.8.19:8100';
+const REGISTRY_URL = process.env.ATEL_REGISTRY || 'http://47.251.8.19:8200';
 const EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
 const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
@@ -1274,7 +1274,7 @@ async function cmdRotate() {
 
 // ─── Platform API Helpers ────────────────────────────────────────
 
-const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_REGISTRY || 'http://47.251.8.19:8100';
+const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_REGISTRY || 'http://47.251.8.19:8200';
 
 async function signedFetch(method, path, payload = {}) {
   const id = requireIdentity();
@@ -1573,7 +1573,7 @@ Boost Commands:
 
 Environment:
   ATEL_DIR                Identity directory (default: .atel)
-  ATEL_REGISTRY           Registry URL (default: http://47.251.8.19:8100)
+  ATEL_REGISTRY           Registry URL (default: http://47.251.8.19:8200)
   ATEL_PLATFORM           Platform URL (default: ATEL_REGISTRY value)
   ATEL_EXECUTOR_URL       Local executor HTTP endpoint
   ATEL_SOLANA_PRIVATE_KEY Solana key for on-chain anchoring
