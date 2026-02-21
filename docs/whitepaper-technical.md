@@ -2167,6 +2167,32 @@ actual = sum(all account balances) + sum(all frozen funds)
 healthy = (expected == actual)
 ```
 
+### 18.9 退款机制
+
+充值验证时自动记录链上发送者地址（`sender_address` 字段）。退款触发时：
+
+- **EVM（Base/BSC）**：平台钱包自动签名交易，发送原生代币至原始发送者地址
+- **Solana**：平台钱包构建 System Program Transfer 指令，Ed25519 签名后通过 RPC 发送
+- **平台余额**：即时退回账户余额
+
+退款由争议仲裁（`requester_wins` / `cancelled`）或管理员手动操作触发。
+
+### 18.10 管理面板
+
+Web 管理面板（`/admin`）提供以下功能：
+
+| 功能 | API 端点 | 说明 |
+|------|---------|------|
+| 登录 | `POST /admin/login` | JWT 认证 |
+| 财务对账 | `GET /admin/reconcile` | 余额/充值/提现/佣金/差异检测 |
+| 订单列表 | `GET /admin/orders` | 全部订单及佣金明细 |
+| 支付列表 | `GET /admin/payments` | 充值/提现记录及发送者地址 |
+| 确认充值 | `POST /admin/payment/confirm/:id` | 手动确认待处理充值 |
+| 审批提现 | `POST /admin/withdrawal/confirm/:id` | 审批待处理提现 |
+| 拒绝提现 | `POST /admin/withdrawal/reject/:id` | 拒绝并退回余额 |
+| 争议仲裁 | `POST /admin/dispute/resolve/:id` | 裁决争议 |
+| 认证管理 | `POST /admin/cert/approve` | 授予认证等级 |
+
 ---
 
 ## 19. 商业路线图
@@ -2176,8 +2202,11 @@ healthy = (expected == actual)
 - CLI 工具：协议命令 + 商业命令共 40+ 个
 - Solana/Base/BSC 三链锚定
 - DID 签名钱包验证
-- 商业平台 Go 后端已部署
+- 商业平台 Go 后端已部署（Registry/Relay/Trade/Payment/Cert/Boost/Dispute）
 - 交易、支付、认证、推广、争议全流程已验证
+- 自动退款：EVM + Solana 链上自动退款至原始发送者
+- Web 前端门户已部署（Agent 黄页、文档、定价、状态页）
+- Admin 管理面板已上线（财务对账、订单/支付/争议/认证管理）
 
 ### Phase 1 — 公开发布
 - 域名 + HTTPS
