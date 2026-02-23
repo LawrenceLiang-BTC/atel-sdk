@@ -51,7 +51,7 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
-  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine,
+  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, ConsentToken,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -313,12 +313,24 @@ async function startToolGatewayProxy(port, identity, policy) {
   const taskGateways = new Map();
 
   // POST /init - Initialize task gateway
-  app.post('/init', (req, res) => {
+  app.post('/init', async (req, res) => {
     const { taskId } = req.body;
     if (!taskId) { res.status(400).json({ error: 'taskId required' }); return; }
 
     const trace = new ExecutionTrace(taskId, identity);
-    const gateway = new ToolGateway(policy, { trace });
+    
+    // Create a permissive PolicyEngine for this task
+    const { ConsentToken } = await import('@lawrenceliang-btc/atel-sdk');
+    const consent = ConsentToken.create({
+      issuer: identity.did,
+      subject: identity.did,
+      scopes: ['tool:*', 'data:*'],
+      maxCalls: policy.rateLimit || 100,
+      ttlSec: 3600,
+    }, identity.secretKey);
+    const taskPolicy = new PolicyEngine(consent);
+    
+    const gateway = new ToolGateway(taskPolicy, { trace });
 
     taskGateways.set(taskId, { gateway, trace, tools: new Map() });
     res.json({ status: 'initialized', taskId, proxyUrl: `http://127.0.0.1:${port}` });
