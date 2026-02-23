@@ -1427,13 +1427,42 @@ async function cmdEscrow(orderId) {
 async function cmdComplete(orderId, taskId) {
   if (!orderId) { console.error('Usage: atel complete <orderId> [taskId] [--proof]'); process.exit(1); }
   const id = requireIdentity();
+  const policy = loadPolicy();
   const effectiveTaskId = taskId || orderId;
   const payload = {};
   if (taskId) payload.taskId = taskId;
 
+  // Fetch order info for context
+  let requesterDid = 'unknown';
+  let orderInfo = null;
+  try {
+    orderInfo = await signedFetch('GET', `/trade/v1/order/${orderId}`);
+    requesterDid = orderInfo.requesterDid || 'unknown';
+  } catch (e) { console.error(`[complete] Warning: could not fetch order info: ${e.message}`); }
+
+  // ── ContentAuditor: audit the completion context ──
+  const auditor = new ContentAuditor();
+  const auditResult = auditor.audit({ orderId, taskId: effectiveTaskId, action: 'complete' }, { action: 'complete', from: requesterDid });
+  if (auditResult.blocked) {
+    console.error(`[complete] BLOCKED by ContentAuditor: ${auditResult.reason}`);
+    process.exit(1);
+  }
+  if (auditResult.warnings?.length > 0) {
+    console.error(`[complete] ContentAuditor warnings: ${auditResult.warnings.join(', ')}`);
+  }
+
+  // ── PolicyEnforcer: check policy compliance ──
+  const enforcer = new PolicyEnforcer(policy);
+  const policyCheck = enforcer.check({ from: requesterDid, action: 'complete', payload: { orderId } });
+  if (policyCheck && !policyCheck.allowed) {
+    console.error(`[complete] BLOCKED by PolicyEnforcer: ${policyCheck.reason}`);
+    process.exit(1);
+  }
+
   // Try to load existing trace, otherwise generate fresh proof + anchor
   let proof = null;
   let anchor = null;
+  let trace = null;
   const traceData = loadTrace(effectiveTaskId);
   if (traceData) {
     try {
@@ -1447,9 +1476,11 @@ async function cmdComplete(orderId, taskId) {
 
   // Generate fresh proof if none found
   if (!proof) {
-    console.error('[complete] No existing trace found, generating fresh proof...');
-    const trace = new ExecutionTrace(effectiveTaskId, id);
-    trace.append('TASK_RECEIVED', { orderId, taskId: effectiveTaskId });
+    console.error('[complete] Generating execution trace + proof...');
+    trace = new ExecutionTrace(effectiveTaskId, id);
+    trace.append('TASK_RECEIVED', { orderId, taskId: effectiveTaskId, requesterDid });
+    trace.append('CONTENT_AUDIT', { result: auditResult.blocked ? 'blocked' : 'passed', warnings: auditResult.warnings || [] });
+    trace.append('POLICY_CHECK', { result: 'passed' });
     trace.append('EXECUTION', { mode: 'cli-complete', orderId });
     trace.finalize({ orderId, status: 'completed' });
     saveTrace(effectiveTaskId, trace);
@@ -1458,15 +1489,9 @@ async function cmdComplete(orderId, taskId) {
     console.error(`[complete] Proof generated: ${proof.proof_id}, trace_root: ${proof.trace_root}`);
   }
 
-  // Anchor on-chain if not already anchored
+  // ── On-chain Anchoring ──
   if (!anchor) {
     console.error('[complete] Anchoring proof on-chain...');
-    // Fetch order to get requester DID
-    let requesterDid = 'unknown';
-    try {
-      const orderData = await signedFetch('GET', `/trade/v1/order/${orderId}`);
-      requesterDid = orderData.requesterDid || 'unknown';
-    } catch {}
     anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid, taskId: effectiveTaskId, action: 'cli-complete' });
     if (anchor) {
       console.error(`[complete] Anchored on Solana: ${anchor.txHash}`);
@@ -1474,6 +1499,48 @@ async function cmdComplete(orderId, taskId) {
       console.error('[complete] WARNING: On-chain anchoring failed. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.');
     }
   }
+
+  // ── Trust Score Update ──
+  try {
+    if (anchor?.txHash) {
+      const trustScoreClient = new TrustScoreClient();
+      trustScoreClient.addProofRecord({
+        traceRoot: proof.trace_root,
+        txHash: anchor.txHash,
+        chain: 'solana',
+        executor: id.did,
+        taskFrom: requesterDid,
+        action: 'cli-complete',
+        success: true,
+        durationMs: 0,
+        riskLevel: 'low',
+        policyViolations: 0,
+        proofId: proof.proof_id,
+        timestamp: new Date().toISOString(),
+        verified: true,
+      });
+      const scoreReport = trustScoreClient.getAgentScore(id.did);
+      console.error(`[complete] Trust score updated: ${scoreReport.trust_score} (tasks: ${scoreReport.total_tasks})`);
+
+      // ── Push score to Registry ──
+      try {
+        const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
+        const ts = new Date().toISOString();
+        const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
+        const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
+        const { default: nacl } = await import('tweetnacl');
+        const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+        await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
+          signal: AbortSignal.timeout(5000),
+        });
+        console.error(`[complete] Score pushed to Registry: ${scoreReport.trust_score}`);
+      } catch (e) { console.error(`[complete] Registry score push failed: ${e.message}`); }
+    } else {
+      console.error('[complete] Trust score skipped: no on-chain anchor');
+    }
+  } catch (e) { console.error(`[complete] Trust score error: ${e.message}`); }
 
   // Attach proof + anchor to payload
   payload.proofBundle = proof;
