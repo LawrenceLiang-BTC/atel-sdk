@@ -51,7 +51,7 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
-  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, ConsentToken,
+  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, mintConsentToken,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -319,15 +319,15 @@ async function startToolGatewayProxy(port, identity, policy) {
 
     const trace = new ExecutionTrace(taskId, identity);
     
-    // Create a permissive PolicyEngine for this task
-    const { ConsentToken } = await import('@lawrenceliang-btc/atel-sdk');
-    const consent = ConsentToken.create({
-      issuer: identity.did,
-      subject: identity.did,
-      scopes: ['tool:*', 'data:*'],
-      maxCalls: policy.rateLimit || 100,
-      ttlSec: 3600,
-    }, identity.secretKey);
+    // Create a permissive ConsentToken for this task
+    const consent = mintConsentToken(
+      identity.did,
+      identity.did,
+      ['tool:*', 'data:*'],
+      policy.rateLimit || 100,
+      3600,
+      identity.secretKey
+    );
     const taskPolicy = new PolicyEngine(consent);
     
     const gateway = new ToolGateway(taskPolicy, { trace });
