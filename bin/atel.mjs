@@ -1317,6 +1317,78 @@ async function cmdTransactions() {
 
 // ─── Trade Commands ──────────────────────────────────────────────
 
+// ─── Trade Task: High-level one-shot command ────────────────────
+async function cmdTradeTask(capability, description) {
+  if (!capability) { console.error('Usage: atel trade-task <capability> <description> [--budget N] [--executor DID] [--timeout 300]'); process.exit(1); }
+  const id = requireIdentity();
+  const budget = parseFloat(rawArgs.find((a, i) => rawArgs[i-1] === '--budget') || '0');
+  const executorArg = rawArgs.find((a, i) => rawArgs[i-1] === '--executor') || '';
+  const timeout = parseInt(rawArgs.find((a, i) => rawArgs[i-1] === '--timeout') || '300') * 1000;
+  const desc = description || capability;
+
+  // Step 1: Find executor
+  let executorDid = executorArg;
+  if (!executorDid) {
+    console.error(`[trade-task] Searching for executor with capability: ${capability}...`);
+    const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
+    const results = await regClient.search({ type: capability, limit: 5 });
+    if (results.length === 0) { console.error('[trade-task] No executor found for capability: ' + capability); process.exit(1); }
+    // Pick best by trust score (if available), exclude self
+    const candidates = results.filter(r => r.did !== id.did);
+    if (candidates.length === 0) { console.error('[trade-task] No other executor found (only self)'); process.exit(1); }
+    const best = candidates[0]; // Registry returns sorted by score
+    executorDid = best.did;
+    console.error(`[trade-task] Found executor: ${best.name || best.did} (score: ${best.trustScore || 'N/A'})`);
+  }
+
+  // Step 2: Create order
+  console.error(`[trade-task] Creating order: ${capability}, budget: $${budget}...`);
+  const orderData = await signedFetch('POST', '/trade/v1/order', {
+    executorDid, capabilityType: capability, priceAmount: budget, priceCurrency: 'USD', pricingModel: 'per_task',
+  });
+  const orderId = orderData.orderId;
+  console.error(`[trade-task] Order created: ${orderId}`);
+
+  // Step 3: Poll for status changes (executor accepts → auto-escrow → executes → completes)
+  console.error(`[trade-task] Waiting for executor to accept and complete (timeout: ${timeout/1000}s)...`);
+  const startTime = Date.now();
+  let lastStatus = 'created';
+  while (Date.now() - startTime < timeout) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const info = await signedFetch('GET', `/trade/v1/order/${orderId}`);
+      if (info.status !== lastStatus) {
+        console.error(`[trade-task] Status: ${lastStatus} → ${info.status}`);
+        lastStatus = info.status;
+      }
+      if (info.status === 'completed' || info.status === 'settled') {
+        console.error(`[trade-task] Task completed! Confirming delivery...`);
+        // Auto-confirm if still completed (not yet settled)
+        if (info.status === 'completed') {
+          try {
+            await signedFetch('POST', `/trade/v1/order/${orderId}/confirm`);
+            console.error(`[trade-task] Delivery confirmed and settled.`);
+          } catch (e) {
+            console.error(`[trade-task] Auto-confirm skipped: ${e.message}`);
+          }
+        }
+        // Output final order info
+        const final = await signedFetch('GET', `/trade/v1/order/${orderId}`);
+        console.log(JSON.stringify(final, null, 2));
+        return;
+      }
+      if (info.status === 'rejected' || info.status === 'cancelled') {
+        console.error(`[trade-task] Order ${info.status}. Aborting.`);
+        process.exit(1);
+      }
+    } catch (e) {
+      console.error(`[trade-task] Poll error: ${e.message}`);
+    }
+  }
+  console.error(`[trade-task] Timeout waiting for completion. Order: ${orderId}, last status: ${lastStatus}`);
+  process.exit(1);
+}
+
 async function cmdOrder(executorDid, capType, price) {
   if (!executorDid || !capType || !price) { console.error('Usage: atel order <executorDid> <capabilityType> <price> [currency]'); process.exit(1); }
   const data = await signedFetch('POST', '/trade/v1/order', {
@@ -1346,7 +1418,8 @@ async function cmdReject(orderId) {
 }
 
 async function cmdEscrow(orderId) {
-  if (!orderId) { console.error('Usage: atel escrow <orderId>'); process.exit(1); }
+  console.error('⚠️  DEPRECATED: Escrow is now automatic on accept. No action needed.');
+  if (!orderId) { process.exit(0); }
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/escrow`);
   console.log(JSON.stringify(data, null, 2));
 }
@@ -1531,6 +1604,7 @@ const commands = {
   withdraw: () => cmdWithdraw(args[0], args[1]),
   transactions: () => cmdTransactions(),
   // Trade
+  'trade-task': () => cmdTradeTask(args[0], args.slice(1).join(' ')),
   order: () => cmdOrder(args[0], args[1], args[2]),
   'order-info': () => cmdOrderInfo(args[0]),
   accept: () => cmdAccept(args[0]),
@@ -1584,11 +1658,12 @@ Account Commands:
   transactions                         List payment history
 
 Trade Commands:
+  trade-task <cap> <desc> [--budget N]   One-shot: search → order → wait → confirm (requester)
   order <executorDid> <cap> <price>    Create a trade order
   order-info <orderId>                 Get order details
-  accept <orderId>                     Accept an order (executor)
+  accept <orderId>                     Accept an order (auto-escrow for paid orders)
   reject <orderId>                     Reject an order (executor)
-  escrow <orderId>                     Freeze funds for order (requester)
+  escrow <orderId>                     [DEPRECATED] Escrow is now automatic on accept
   complete <orderId> [taskId]          Mark order complete + attach proof (executor)
   confirm <orderId>                    Confirm delivery + settle (requester)
   rate <orderId> <1-5> [comment]       Rate the other party
