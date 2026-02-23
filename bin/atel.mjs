@@ -552,22 +552,28 @@ async function cmdStart(port) {
           payload
         };
         
+        log({ event: 'order_accept_calling_api', orderId, platform: ATEL_PLATFORM });
+        
         const acceptResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/accept`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(signedRequest)
+          body: JSON.stringify(signedRequest),
+          signal: AbortSignal.timeout(10000), // 10秒超时
         });
+        
+        log({ event: 'order_accept_response', orderId, status: acceptResp.status, ok: acceptResp.ok });
         
         if (acceptResp.ok) {
           log({ event: 'order_accepted', orderId });
           res.json({ status: 'accepted', orderId });
         } else {
           const error = await acceptResp.text();
-          log({ event: 'order_accept_failed', orderId, error });
+          log({ event: 'order_accept_failed', orderId, error, status: acceptResp.status });
           res.status(500).json({ error: 'accept failed: ' + error });
         }
       } catch (err) {
-        log({ event: 'order_accept_error', orderId, error: err.message });
+        log({ event: 'order_accept_error', orderId, error: err.message, stack: err.stack });
+        console.error('[ERROR] Order accept failed:', err);
         res.status(500).json({ error: err.message });
       }
       return;
@@ -597,6 +603,8 @@ async function cmdStart(port) {
 
       // Forward to executor with toolProxy
       try {
+        log({ event: 'task_forward_calling_executor', orderId, executor: EXECUTOR_URL });
+        
         const execResp = await fetch(EXECUTOR_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -606,19 +614,23 @@ async function cmdStart(port) {
             action: capabilityType,
             payload: { orderId, priceAmount },
             toolProxy: `http://127.0.0.1:${toolProxyPort}`
-          })
+          }),
+          signal: AbortSignal.timeout(10000), // 10秒超时
         });
+
+        log({ event: 'task_forward_response', orderId, status: execResp.status, ok: execResp.ok });
 
         if (execResp.ok) {
           log({ event: 'task_forwarded_to_executor', orderId });
           res.json({ status: 'forwarded', orderId });
         } else {
           const error = await execResp.text();
-          log({ event: 'task_forward_failed', orderId, error });
+          log({ event: 'task_forward_failed', orderId, error, status: execResp.status });
           res.status(500).json({ error: 'forward failed: ' + error });
         }
       } catch (err) {
-        log({ event: 'task_forward_error', orderId, error: err.message });
+        log({ event: 'task_forward_error', orderId, error: err.message, stack: err.stack });
+        console.error('[ERROR] Task forward failed:', err);
         res.status(500).json({ error: err.message });
       }
       return;
@@ -745,6 +757,8 @@ async function cmdStart(port) {
     if (ATEL_PLATFORM && taskId.startsWith('ord-')) {
       (async () => {
         try {
+          log({ event: 'platform_complete_starting', orderId: taskId, hasAnchor: !!anchor, chain: anchor?.chain });
+          
           const timestamp = new Date().toISOString();
           const payload = {
             proofBundle: proof,
@@ -763,14 +777,18 @@ async function cmdStart(port) {
             signal: AbortSignal.timeout(10000),
           });
           
+          log({ event: 'platform_complete_response', orderId: taskId, status: completeResp.status, ok: completeResp.ok });
+          
           if (completeResp.ok) {
             log({ event: 'platform_complete_success', orderId: taskId });
           } else {
             const error = await completeResp.text();
-            log({ event: 'platform_complete_failed', orderId: taskId, error });
+            log({ event: 'platform_complete_failed', orderId: taskId, error, status: completeResp.status });
+            console.error('[ERROR] Platform complete failed:', error);
           }
         } catch (err) {
-          log({ event: 'platform_complete_error', orderId: taskId, error: err.message });
+          log({ event: 'platform_complete_error', orderId: taskId, error: err.message, stack: err.stack });
+          console.error('[ERROR] Platform complete exception:', err);
         }
       })();
     }
@@ -1053,6 +1071,21 @@ async function cmdStart(port) {
     if (tunnelManager) await tunnelManager.stop();
     await endpoint.stop(); 
     process.exit(0); 
+  });
+
+  // Global error handlers
+  process.on('uncaughtException', (err) => {
+    log({ event: 'uncaught_exception', error: err.message, stack: err.stack });
+    console.error('[FATAL] Uncaught exception:', err);
+    // Don't exit immediately, give time to log
+    setTimeout(() => process.exit(1), 1000);
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    log({ event: 'unhandled_rejection', reason: String(reason), promise: String(promise) });
+    console.error('[FATAL] Unhandled rejection:', reason);
+    // Don't exit immediately, give time to log
+    setTimeout(() => process.exit(1), 1000);
   });
 }
 
