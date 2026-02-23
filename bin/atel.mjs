@@ -1353,21 +1353,60 @@ async function cmdEscrow(orderId) {
 
 async function cmdComplete(orderId, taskId) {
   if (!orderId) { console.error('Usage: atel complete <orderId> [taskId] [--proof]'); process.exit(1); }
+  const id = requireIdentity();
+  const effectiveTaskId = taskId || orderId;
   const payload = {};
   if (taskId) payload.taskId = taskId;
-  // Auto-attach proof if trace exists for this task
-  if (taskId) {
-    const traceData = loadTrace(taskId);
-    if (traceData) {
-      try {
-        const lines = traceData.trim().split('\n').map(l => JSON.parse(l));
-        const proofLine = lines.find(l => l.proof_id);
-        if (proofLine) payload.proofBundle = proofLine;
-        const anchorLine = lines.find(l => l.anchor_tx);
-        if (anchorLine) { payload.anchorTx = anchorLine.anchor_tx; payload.traceRoot = anchorLine.trace_root; }
-      } catch {}
+
+  // Try to load existing trace, otherwise generate fresh proof + anchor
+  let proof = null;
+  let anchor = null;
+  const traceData = loadTrace(effectiveTaskId);
+  if (traceData) {
+    try {
+      const lines = traceData.trim().split('\n').map(l => JSON.parse(l));
+      const proofLine = lines.find(l => l.proof_id);
+      if (proofLine) proof = proofLine;
+      const anchorLine = lines.find(l => l.anchor_tx);
+      if (anchorLine) anchor = { txHash: anchorLine.anchor_tx, trace_root: anchorLine.trace_root };
+    } catch {}
+  }
+
+  // Generate fresh proof if none found
+  if (!proof) {
+    console.error('[complete] No existing trace found, generating fresh proof...');
+    const trace = new ExecutionTrace(effectiveTaskId, id);
+    trace.append('TASK_RECEIVED', { orderId, taskId: effectiveTaskId });
+    trace.append('EXECUTION', { mode: 'cli-complete', orderId });
+    trace.finalize({ orderId, status: 'completed' });
+    saveTrace(effectiveTaskId, trace);
+    const proofGen = new ProofGenerator(trace, id);
+    proof = proofGen.generate('cli-complete', `order-${orderId}`, JSON.stringify({ orderId, status: 'completed' }));
+    console.error(`[complete] Proof generated: ${proof.proof_id}, trace_root: ${proof.trace_root}`);
+  }
+
+  // Anchor on-chain if not already anchored
+  if (!anchor) {
+    console.error('[complete] Anchoring proof on-chain...');
+    // Fetch order to get requester DID
+    let requesterDid = 'unknown';
+    try {
+      const orderData = await signedFetch('GET', `/trade/v1/order/${orderId}`);
+      requesterDid = orderData.requesterDid || 'unknown';
+    } catch {}
+    anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid, taskId: effectiveTaskId, action: 'cli-complete' });
+    if (anchor) {
+      console.error(`[complete] Anchored on Solana: ${anchor.txHash}`);
+    } else {
+      console.error('[complete] WARNING: On-chain anchoring failed. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.');
     }
   }
+
+  // Attach proof + anchor to payload
+  payload.proofBundle = proof;
+  payload.traceRoot = proof.trace_root;
+  if (anchor?.txHash) payload.anchorTx = anchor.txHash;
+
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/complete`, payload);
   console.log(JSON.stringify(data, null, 2));
 }
