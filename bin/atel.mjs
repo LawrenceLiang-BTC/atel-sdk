@@ -704,6 +704,38 @@ async function cmdStart(port) {
       log({ event: 'anchor_missing', taskId, warning: 'Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.', timestamp: new Date().toISOString() });
     }
 
+    // ── Platform Complete (async, don't block) ──
+    if (ATEL_PLATFORM && taskId.startsWith('ord-')) {
+      (async () => {
+        try {
+          const timestamp = new Date().toISOString();
+          const payload = {
+            proofBundle: proof,
+            traceRoot: proof.trace_root,
+            anchorTx: anchor?.txHash || null,
+          };
+          const signPayload = { did: id.did, timestamp, payload };
+          const signature = sign(signPayload, id.secretKey);
+          
+          const completeResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${taskId}/complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ did: id.did, timestamp, signature, payload }),
+            signal: AbortSignal.timeout(10000),
+          });
+          
+          if (completeResp.ok) {
+            log({ event: 'platform_complete_success', orderId: taskId });
+          } else {
+            const error = await completeResp.text();
+            log({ event: 'platform_complete_failed', orderId: taskId, error });
+          }
+        } catch (err) {
+          log({ event: 'platform_complete_error', orderId: taskId, error: err.message });
+        }
+      })();
+    }
+
     log({ event: 'task_completed', taskId, from: task.from, action: task.action, success: success !== false, proof_id: proof.proof_id, trace_root: proof.trace_root, anchor_tx: anchor?.txHash || null, duration_ms: durationMs, timestamp: new Date().toISOString() });
 
     // Push result back to sender
