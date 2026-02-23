@@ -252,8 +252,8 @@ class PolicyEnforcer {
 
 // ─── On-chain Anchoring ──────────────────────────────────────────
 
-async function anchorOnChain(traceRoot, metadata) {
-  const chain = detectPreferredChain();
+async function anchorOnChain(traceRoot, metadata, preferredChain) {
+  const chain = preferredChain || detectPreferredChain();
   if (!chain) return null;
 
   try {
@@ -581,9 +581,9 @@ async function cmdStart(port) {
 
     if (event === 'task_start') {
       // Task execution notification - forward to executor
-      const { orderId, requesterDid, capabilityType, priceAmount } = payload;
+      const { orderId, requesterDid, capabilityType, priceAmount, chain } = payload;
       
-      log({ event: 'task_start_received', orderId, requesterDid });
+      log({ event: 'task_start_received', orderId, requesterDid, chain });
       
       // Forward to executor
       if (!EXECUTOR_URL) {
@@ -596,6 +596,7 @@ async function cmdStart(port) {
       pendingTasks[orderId] = {
         from: requesterDid,
         action: capabilityType,
+        chain: chain,  // 保存 chain
         acceptedAt: new Date().toISOString(),
         encrypted: false
       };
@@ -706,7 +707,7 @@ async function cmdStart(port) {
     const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `task-from-${task.from}`, JSON.stringify(result));
 
     // ── On-chain Anchoring ──
-    const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid: task.from, taskId, action: task.action });
+    const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid: task.from, taskId, action: task.action }, task.chain);
 
     // ── Trust Score Update ──
     try {
