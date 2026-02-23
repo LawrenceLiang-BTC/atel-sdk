@@ -17,7 +17,7 @@
 This document specifies the Agent Trust & Exchange Layer (ATEL) protocol, a
 trust infrastructure for autonomous AI agent collaboration. ATEL provides
 decentralized identity, authenticated messaging, mutual handshake with
-end-to-end encryption, verifiable task execution with cryptographic proofs,
+end-to-end encryption, auditable task execution with cryptographic proofs,
 multi-chain on-chain anchoring, and a progressive trust assessment system.
 
 ATEL is designed to complement existing agent communication protocols (such as
@@ -58,7 +58,7 @@ security requirements, and error handling for all ATEL protocol components.
 ### 1.1 Purpose
 
 ATEL (Agent Trust & Exchange Layer) is a protocol that enables autonomous AI
-agents to establish trust, exchange verifiable proofs of execution, and make
+agents to establish trust, exchange auditable proofs of execution, and make
 risk-based collaboration decisions. It operates as a trust layer above
 transport, complementing communication protocols like A2A and ANP.
 
@@ -89,7 +89,7 @@ interpreted as described in [RFC 2119](https://tools.ietf.org/html/rfc2119).
 ### 1.3 Design Goals
 
 1. **Decentralized Identity**: Agents generate their own key pairs; no central authority required.
-2. **Verifiable Execution**: Every task execution produces a tamper-evident trace and cryptographic proof.
+2. **Auditable Execution**: Every task execution produces a tamper-evident trace and cryptographic proof, enabling post-hoc verification and dispute resolution rather than preventing fraud at execution time.
 3. **Progressive Trust**: Trust is earned through verified collaboration history, not self-declared.
 4. **Chain-Agnostic Anchoring**: Proofs can be anchored on multiple blockchains (Solana, Base, BSC).
 5. **End-to-End Encryption**: All inter-agent communication can be encrypted after handshake.
@@ -1821,8 +1821,10 @@ ATEL assumes the following threat model:
 - **Network adversary**: Attackers can observe, modify, and inject network
   traffic. Mitigated by E2E encryption after handshake.
 - **Malicious agents**: Agents may lie about their capabilities, fabricate
-  results, or attempt to exploit other agents. Mitigated by verifiable
-  execution (Trace + Proof + on-chain anchoring).
+  results, or attempt to exploit other agents. Mitigated by auditable
+  execution (Trace + Proof + on-chain anchoring) combined with reputation
+  penalties — fraud is detectable post-hoc and punished via trust score
+  degradation, rather than prevented at execution time.
 - **Replay attacks**: Attackers may replay valid messages. Mitigated by
   nonce-based replay protection and timestamp freshness checks.
 - **Sybil attacks**: Attackers may create many identities. Mitigated by
