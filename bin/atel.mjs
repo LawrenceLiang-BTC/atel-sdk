@@ -49,7 +49,8 @@ import { resolve, join } from 'node:path';
 import {
   AgentIdentity, AgentEndpoint, AgentClient, HandshakeManager,
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
-  SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
+  SolanaAnchorProvider, BaseAnchorProvider, BSCAnchorProvider,
+  autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
   RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, mintConsentToken, sign,
 } from '@lawrenceliang-btc/atel-sdk';
@@ -118,6 +119,14 @@ async function getWalletAddresses() {
     } catch {}
   }
   return Object.keys(wallets).length > 0 ? wallets : undefined;
+}
+
+// Detect preferred chain based on configured private keys
+function detectPreferredChain() {
+  if (process.env.ATEL_SOLANA_PRIVATE_KEY) return 'solana';
+  if (process.env.ATEL_BASE_PRIVATE_KEY) return 'base';
+  if (process.env.ATEL_BSC_PRIVATE_KEY) return 'bsc';
+  return null;
 }
 
 // ─── Unified Trust Score & Level System ──────────────────────────
@@ -244,20 +253,48 @@ class PolicyEnforcer {
 // ─── On-chain Anchoring ──────────────────────────────────────────
 
 async function anchorOnChain(traceRoot, metadata) {
-  const key = process.env.ATEL_SOLANA_PRIVATE_KEY;
-  if (!key) return null;
+  const chain = detectPreferredChain();
+  if (!chain) return null;
+
   try {
-    const s = new SolanaAnchorProvider({ rpcUrl: process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', privateKey: key });
-    // Pass DID info for v2 structured memo: ATEL:1:<executorDID>:<requesterDID>:<taskId>:<trace_root>
-    const r = await s.anchor(traceRoot, {
+    let provider;
+    if (chain === 'solana') {
+      const key = process.env.ATEL_SOLANA_PRIVATE_KEY;
+      if (!key) return null;
+      provider = new SolanaAnchorProvider({ 
+        rpcUrl: process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', 
+        privateKey: key 
+      });
+    } else if (chain === 'base') {
+      const key = process.env.ATEL_BASE_PRIVATE_KEY;
+      if (!key) return null;
+      provider = new BaseAnchorProvider({ 
+        rpcUrl: process.env.ATEL_BASE_RPC_URL || 'https://mainnet.base.org', 
+        privateKey: key 
+      });
+    } else if (chain === 'bsc') {
+      const key = process.env.ATEL_BSC_PRIVATE_KEY;
+      if (!key) return null;
+      provider = new BSCAnchorProvider({ 
+        rpcUrl: process.env.ATEL_BSC_RPC_URL || 'https://bsc-dataseed.binance.org', 
+        privateKey: key 
+      });
+    } else {
+      return null;
+    }
+
+    const r = await provider.anchor(traceRoot, {
       executorDid: metadata?.executorDid,
       requesterDid: metadata?.requesterDid || metadata?.task_from,
       taskId: metadata?.taskId,
       ...metadata,
     });
-    log({ event: 'proof_anchored', chain: 'solana', txHash: r.txHash, block: r.blockNumber, trace_root: traceRoot });
-    return r;
-  } catch (e) { log({ event: 'anchor_failed', chain: 'solana', error: e.message }); return null; }
+    log({ event: 'proof_anchored', chain, txHash: r.txHash, block: r.blockNumber, trace_root: traceRoot });
+    return { ...r, chain };
+  } catch (e) { 
+    log({ event: 'anchor_failed', chain, error: e.message }); 
+    return null; 
+  }
 }
 
 // ─── Commands ────────────────────────────────────────────────────
@@ -713,6 +750,7 @@ async function cmdStart(port) {
             proofBundle: proof,
             traceRoot: proof.trace_root,
             anchorTx: anchor?.txHash || null,
+            chain: anchor?.chain || null,
             traceEvents: trace.events, // Include trace events for verification
           };
           const signPayload = { did: id.did, timestamp, payload };
@@ -904,8 +942,9 @@ async function cmdStart(port) {
       const bestDirect = networkConfig.candidates.find(c => c.type !== 'relay') || networkConfig.candidates[0];
       const discoverable = policy.discoverable !== false;
       const wallets = await getWalletAddresses();
-      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable, wallets }, id);
-      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable, wallets: wallets ? Object.keys(wallets) : [] });
+      const preferredChain = detectPreferredChain();
+      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable, wallets, preferredChain }, id);
+      log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable, wallets: wallets ? Object.keys(wallets) : [], preferredChain });
     } catch (e) { log({ event: 'auto_register_failed', error: e.message }); }
   }
 
