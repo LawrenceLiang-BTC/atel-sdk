@@ -602,38 +602,40 @@ async function cmdStart(port) {
       };
       saveTasks(pendingTasks);
 
-      // Forward to executor with toolProxy
-      try {
-        log({ event: 'task_forward_calling_executor', orderId, executor: EXECUTOR_URL });
-        
-        const execResp = await fetch(EXECUTOR_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            taskId: orderId,
-            from: requesterDid,
-            action: capabilityType,
-            payload: { orderId, priceAmount },
-            toolProxy: `http://127.0.0.1:${toolProxyPort}`
-          }),
-          signal: AbortSignal.timeout(10000), // 10秒超时
-        });
+      // Respond immediately to relay, then forward to executor async
+      res.json({ status: 'accepted', orderId });
 
-        log({ event: 'task_forward_response', orderId, status: execResp.status, ok: execResp.ok });
+      // Async: forward to executor (no timeout pressure from relay)
+      (async () => {
+        try {
+          log({ event: 'task_forward_calling_executor', orderId, executor: EXECUTOR_URL });
+          
+          const execResp = await fetch(EXECUTOR_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              taskId: orderId,
+              from: requesterDid,
+              action: capabilityType,
+              payload: { orderId, priceAmount },
+              toolProxy: `http://127.0.0.1:${toolProxyPort}`
+            }),
+            signal: AbortSignal.timeout(600000), // 10 min timeout
+          });
 
-        if (execResp.ok) {
-          log({ event: 'task_forwarded_to_executor', orderId });
-          res.json({ status: 'forwarded', orderId });
-        } else {
-          const error = await execResp.text();
-          log({ event: 'task_forward_failed', orderId, error, status: execResp.status });
-          res.status(500).json({ error: 'forward failed: ' + error });
+          log({ event: 'task_forward_response', orderId, status: execResp.status, ok: execResp.ok });
+
+          if (!execResp.ok) {
+            const error = await execResp.text();
+            log({ event: 'task_forward_failed', orderId, error, status: execResp.status });
+          } else {
+            log({ event: 'task_forwarded_to_executor', orderId });
+          }
+        } catch (err) {
+          log({ event: 'task_forward_error', orderId, error: err.message, stack: err.stack });
+          console.error('[ERROR] Task forward failed:', err);
         }
-      } catch (err) {
-        log({ event: 'task_forward_error', orderId, error: err.message, stack: err.stack });
-        console.error('[ERROR] Task forward failed:', err);
-        res.status(500).json({ error: err.message });
-      }
+      })();
       return;
     }
 
