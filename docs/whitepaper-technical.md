@@ -2,8 +2,8 @@
 
 ## Agent Trust & Exchange Layer — 完整技术规范
 
-**版本：** v0.8.1 Internal
-**日期：** 2026年2月15日
+**版本：** v0.8.2 Internal
+**日期：** 2026年2月23日
 **分类：** 内部技术文档 · 不对外公开
 **SDK：** `@lawrenceliang-btc/atel-sdk@0.8.1`
 **测试：** 338 tests passing
@@ -2302,3 +2302,274 @@ Web 管理面板（`/admin`）提供以下功能：
 ---
 
 *文档结束。SDK v0.8.3 · 341 tests · 23 modules · 2026-02-16*
+
+---
+
+## 附录 C：2026-02-23 重大更新
+
+### C.1 三链支持完整架构
+
+**设计理念：Agent 选择链，全程使用**
+
+ATEL 支持三条公链（Solana、Base、BSC），但不是"按优先级尝试"，而是：
+1. Agent 注册时选择一条链（基于配置的私钥）
+2. 该 Agent 的所有任务都使用该链锚定
+3. Platform 记录 Agent 的 preferredChain
+4. 验证时根据 chain 字段查询对应的链
+
+**完整流程：**
+
+```
+Agent 注册 → SDK 检测私钥 → 提交 preferredChain (metadata)
+    ↓
+订单创建 → Platform 读取 executor metadata → 存储 chain 到 orders
+    ↓
+任务执行 → SDK 根据 preferredChain 选择 provider → 链上锚定
+    ↓
+Complete → SDK 提交 chain + traceEvents → Platform 存储
+    ↓
+Confirm → Platform 验证 proof (6项) + trace 完整性 + 链上验证
+```
+
+**关键代码：**
+
+```javascript
+// SDK: 检测链
+function detectPreferredChain() {
+  if (process.env.ATEL_SOLANA_PRIVATE_KEY) return 'solana';
+  if (process.env.ATEL_BASE_PRIVATE_KEY) return 'base';
+  if (process.env.ATEL_BSC_PRIVATE_KEY) return 'bsc';
+  return null;
+}
+
+// SDK: 注册时提交
+await regClient.register({ 
+  ..., 
+  metadata: { preferredChain: detectPreferredChain() } 
+}, identity);
+
+// Platform: 订单创建时读取
+var execMetadata []byte
+db.DB.QueryRow("SELECT metadata FROM agents WHERE did=$1", executorDID).Scan(&execMetadata)
+var chain string
+if execMetadata != nil {
+  var metadata map[string]interface{}
+  json.Unmarshal(execMetadata, &metadata)
+  chain = metadata["preferredChain"].(string)
+}
+db.DB.Exec(`INSERT INTO orders (..., chain) VALUES (..., $8)`, ..., chain)
+
+// SDK: 锚定时选择 provider
+async function anchorOnChain(traceRoot, metadata) {
+  const chain = detectPreferredChain();
+  let provider;
+  if (chain === 'solana') provider = new SolanaAnchorProvider({...});
+  else if (chain === 'base') provider = new BaseAnchorProvider({...});
+  else if (chain === 'bsc') provider = new BSCAnchorProvider({...});
+  const r = await provider.anchor(traceRoot, metadata);
+  return { ...r, chain };
+}
+```
+
+### C.2 ToolGateway 强制执行
+
+**问题：** Executor 可以伪造 trace。
+
+**解决方案：** SDK 启动时在 port+1 启动 ToolGateway 代理，所有工具调用必须经过代理。
+
+**架构：**
+
+```
+Executor → ToolGateway Proxy (port+1) → Actual Tools
+                ↓
+           记录 TOOL_CALL + TOOL_RESULT
+                ↓
+           返回完整 trace
+```
+
+**关键代码：**
+
+```javascript
+// SDK: 启动 ToolGateway 代理
+async function startToolGatewayProxy(port, identity, policy) {
+  const app = express();
+  const gateways = new Map();
+  
+  app.post('/init', (req, res) => {
+    const gateway = new ToolGateway(req.body.taskId, identity, policy);
+    gateways.set(req.body.taskId, gateway);
+    res.json({ status: 'initialized' });
+  });
+  
+  app.post('/call', async (req, res) => {
+    const gateway = gateways.get(req.body.taskId);
+    const result = await gateway.callTool(req.body.toolName, req.body.params);
+    res.json(result);
+  });
+  
+  app.post('/finalize', (req, res) => {
+    const gateway = gateways.get(req.body.taskId);
+    const trace = gateway.finalize();
+    res.json({ trace });
+  });
+  
+  app.listen(port + 1);
+}
+
+// Executor: 使用 ToolGateway
+await fetch(`${toolProxy}/init`, { method: 'POST', body: JSON.stringify({ taskId }) });
+await fetch(`${toolProxy}/register`, { method: 'POST', body: JSON.stringify({ taskId, toolName: 'openclaw_agent', toolUrl }) });
+const result = await fetch(`${toolProxy}/call`, { method: 'POST', body: JSON.stringify({ taskId, toolName: 'openclaw_agent', params }) });
+const { trace } = await fetch(`${toolProxy}/finalize`, { method: 'POST', body: JSON.stringify({ taskId }) }).then(r => r.json());
+```
+
+### C.3 Platform 自动化流程
+
+**问题：** 旧版需要手动 accept、complete、confirm。
+
+**解决方案：** Platform 通过 Relay 推送 webhook，Agent 自动处理。
+
+**流程：**
+
+```
+订单创建 → Platform 通知 executor (via Relay) → Agent 自动 accept
+    ↓
+Accept 成功 → Platform 通知 task_start (via Relay) → Agent 转发给 executor
+    ↓
+Executor 完成 → 返回 trace → Agent 生成 proof + 链上锚定 → 自动 complete
+    ↓
+Complete 成功 → 10分钟后自动 confirm（或 requester 手动 confirm）
+```
+
+**关键代码：**
+
+```javascript
+// SDK: Webhook 接收
+app.post('/atel/v1/notify', async (req, res) => {
+  const { event, payload } = req.body;
+  
+  if (event === 'order_created') {
+    // 自动 accept
+    await fetch(`${ATEL_PLATFORM}/trade/v1/order/${payload.orderId}/accept`, {
+      method: 'POST',
+      body: JSON.stringify(signedRequest)
+    });
+  }
+  
+  if (event === 'task_start') {
+    // 转发给 executor
+    await fetch(`${EXECUTOR_URL}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ taskId: payload.orderId, toolProxy: `http://127.0.0.1:${port+1}` })
+    });
+  }
+});
+
+// SDK: Relay 长轮询
+const pollRelay = async () => {
+  while (true) {
+    const resp = await fetch(`${relayUrl}/relay/v1/poll`, {
+      method: 'POST',
+      body: JSON.stringify({ did: id.did })
+    });
+    const requests = await resp.json();
+    for (const req of requests) {
+      await fetch(`http://127.0.0.1:${port}${req.path}`, {
+        method: req.method,
+        body: JSON.stringify(req.body)
+      });
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+};
+```
+
+### C.4 Proof 验证（6项检查 + trace 完整性）
+
+**Platform confirm 验证逻辑：**
+
+```go
+// 1. Proof 6项检查
+if order.ProofBundle != nil {
+  var proof map[string]interface{}
+  json.Unmarshal(order.ProofBundle, &proof)
+  
+  // Check 1: executor DID 匹配
+  if proof["executor_did"] != order.ExecutorDID { return error }
+  
+  // Check 2: trace_root 匹配
+  if proof["trace_root"] != order.TraceRoot { return error }
+  
+  // Check 3: 签名存在
+  if proof["signature"] == nil { return error }
+  
+  // Check 4: trace_length > 0
+  if proof["trace_length"].(float64) <= 0 { return error }
+  
+  // Check 5: 时间戳合理（24小时内）
+  createdAt, _ := time.Parse(time.RFC3339, proof["created_at"].(string))
+  if time.Since(createdAt) > 24*time.Hour { return error }
+  
+  // Check 6: attestations 存在
+  if proof["attestations"] == nil { return error }
+}
+
+// 2. 链上验证（如果有 anchor_tx）
+if order.AnchorTx != "" && order.Chain != "" {
+  if !verifyOnChain(order.Chain, order.AnchorTx, order.TraceRoot) {
+    return error("on-chain verification failed")
+  }
+}
+
+// 3. Trace 完整性检查（必须有 TOOL_CALL）
+var metadata map[string]interface{}
+json.Unmarshal(order.Metadata, &metadata)
+if traceEvents, ok := metadata["trace_events"].([]interface{}); ok {
+  hasToolCall := false
+  for _, event := range traceEvents {
+    if e["event"] == "TOOL_CALL" {
+      hasToolCall = true
+      break
+    }
+  }
+  if !hasToolCall { return error("trace must contain TOOL_CALL events") }
+}
+```
+
+### C.5 数据库变更
+
+```sql
+-- orders 表新增字段
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS metadata jsonb;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS chain text;
+
+-- agents 表已有 metadata 字段（存储 preferredChain）
+```
+
+### C.6 已知问题
+
+1. **Solana RPC 限流**：公共 RPC 频繁 403，需要付费 RPC
+2. **verifyOnChain 未实现**：框架已完成，实际链上查询逻辑待实现
+3. **Agent 稳定性**：测试中多次崩溃，需要更完善的错误日志
+
+### C.7 测试结果
+
+**订单 ord-715703e1-914（对方测试）：**
+- ✅ status: completed
+- ✅ chain: "solana"
+- ✅ anchorTx: 5psAeAE7g5aC3yRUcxWauB52EodFn6uC4nGBxu7eQuJ4...
+- ✅ traceRoot: 24f1271d7b7863f6a10d7b39920c86e3f78f4e97...
+- ✅ hasProof: true
+- ✅ traceEvents: 4（包含 TOOL_CALL）
+
+**本地测试：**
+- ord-c7f954f5-2d5（免费）：完整流程 + confirm 成功
+- ord-e23e087d-9be（$10 付费）：余额检查 + escrow + confirm 成功
+
+**全程自动化，无需人工干预。**
+
+---
+
+**文档更新：** 2026年2月23日
+**更新内容：** 三链支持、ToolGateway 强制执行、Platform 自动化流程、Proof 验证
+**版本：** v0.8.2
