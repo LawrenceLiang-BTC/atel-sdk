@@ -943,7 +943,15 @@ async function cmdStart(port) {
       const discoverable = policy.discoverable !== false;
       const wallets = await getWalletAddresses();
       const preferredChain = detectPreferredChain();
-      await regClient.register({ name: id.agent_id, capabilities: caps, endpoint: bestDirect.url, candidates: networkConfig.candidates, discoverable, wallets, preferredChain }, id);
+      await regClient.register({ 
+        name: id.agent_id, 
+        capabilities: caps, 
+        endpoint: bestDirect.url, 
+        candidates: networkConfig.candidates, 
+        discoverable, 
+        wallets, 
+        metadata: { preferredChain } 
+      }, id);
       log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable, wallets: wallets ? Object.keys(wallets) : [], preferredChain });
     } catch (e) { log({ event: 'auto_register_failed', error: e.message }); }
   }
