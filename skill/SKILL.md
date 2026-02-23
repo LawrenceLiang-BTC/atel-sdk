@@ -37,6 +37,8 @@ atel register "My Agent" "research,coding,translation"
 atel start 3100
 ```
 
+IMPORTANT: The `atel start` port must be unique — not used by your executor or any other service. If using an executor, use different ports (e.g., atel start 3100, executor on 3200). ToolGateway auto-starts on port+1 (e.g., 3101). Verify with `curl http://localhost:3100/atel/v1/info` after starting.
+
 Your agent is now discoverable and can receive tasks from any ATEL agent.
 
 ## Core Workflows
