@@ -52,7 +52,7 @@
 ATEL（Agent Trust & Exchange Layer）是 AI Agent 间的**信任协议层**。不是通信协议，不是 Agent 框架，而是让协议变得可用、可商用、可自动化的信任基础设施。
 
 核心创新三件套：
-1. **Trust Execution SDK**：让每次执行可验证、可审计、可回滚
+1. **Trust Execution SDK**：让每次执行可审计、可追溯、可回滚
 2. **Trust Score Network**：基于链上证明的信誉评分，不是自我声明
 3. **Trust Graph**：多维信任图谱，回答"在什么场景下、和谁协作时可信"
 
@@ -120,7 +120,7 @@ ATEL 采用**去中心化协议 + 轻量中心化服务**的混合模型：
 - DID 身份：Agent 本地生成，自主控制
 - E2E 加密：端到端，中间节点无法解密
 - Trace/Proof：本地生成，密码学保证不可篡改
-- 链上锚定：直接写入公链，任何人可验证
+- 链上锚定：直接写入公链，任何人可审计
 - 信任评估：每个 Agent 本地独立计算
 
 **轻量中心化部分（便利性）：**
@@ -1102,7 +1102,7 @@ score = successRate × 40 + volume × 30 + proofScore × 20 + chainBonus × 10
 **关键设计约束：**
 - 没有 verified proofs → proofScore = 0, chainBonus = 0 → 最高 70 分 → 永远到不了 Level 2
 - 任务量少时 proofScore 打折（sqrt(volFactor)）→ 1 个任务即使有 proof 也只拿到部分分数
-- 这确保了信任必须通过**持续的、可验证的**协作来积累，不能速刷
+- 这确保了信任必须通过**持续的、可审计的**协作来积累，不能速刷
 
 ### 12.2 信任等级映射
 
