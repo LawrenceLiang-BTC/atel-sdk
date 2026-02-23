@@ -51,13 +51,14 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
-  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, mintConsentToken,
+  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, mintConsentToken, sign,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
 const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
 const IDENTITY_FILE = resolve(ATEL_DIR, 'identity.json');
 const REGISTRY_URL = process.env.ATEL_REGISTRY || 'http://47.251.8.19:8200';
+const ATEL_PLATFORM = process.env.ATEL_PLATFORM || 'http://47.251.8.19:8200';
 const EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
 const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
@@ -472,6 +473,118 @@ async function cmdStart(port) {
     if (!traceData) { res.status(404).json({ error: 'Trace not found' }); return; }
     const events = traceData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
     res.json({ taskId, events, agent: id.did });
+  });
+
+  // Webhook notification: POST /atel/v1/notify (platform calls this for order events)
+  endpoint.app?.post?.('/atel/v1/notify', async (req, res) => {
+    const { event, payload } = req.body || {};
+    if (!event || !payload) {
+      res.status(400).json({ error: 'event and payload required' });
+      return;
+    }
+
+    log({ event: 'webhook_received', type: event, payload });
+
+    if (event === 'order_created') {
+      // New order notification - decide whether to accept
+      const { orderId, requesterDid, capabilityType, priceAmount, description } = payload;
+      
+      // Check capability match
+      if (!capTypes.includes(capabilityType)) {
+        log({ event: 'order_rejected', orderId, reason: 'capability_mismatch', required: capabilityType, available: capTypes });
+        res.json({ status: 'rejected', reason: 'capability not supported' });
+        return;
+      }
+
+      // TODO: Add more checks (ContentAuditor, PolicyEngine, etc.)
+      
+      // Auto-accept for now
+      log({ event: 'order_auto_accept', orderId, requesterDid, capabilityType });
+      
+      // Call platform API to accept
+      try {
+        const timestamp = Date.now().toString();
+        const signPayload = { orderId, timestamp };
+        const signature = sign(signPayload, id.secretKey);
+        
+        const acceptResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/accept`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-DID': id.did,
+            'X-Timestamp': timestamp,
+            'X-Signature': signature
+          }
+        });
+        
+        if (acceptResp.ok) {
+          log({ event: 'order_accepted', orderId });
+          res.json({ status: 'accepted', orderId });
+        } else {
+          const error = await acceptResp.text();
+          log({ event: 'order_accept_failed', orderId, error });
+          res.status(500).json({ error: 'accept failed: ' + error });
+        }
+      } catch (err) {
+        log({ event: 'order_accept_error', orderId, error: err.message });
+        res.status(500).json({ error: err.message });
+      }
+      return;
+    }
+
+    if (event === 'task_start') {
+      // Task execution notification - forward to executor
+      const { orderId, requesterDid, capabilityType, priceAmount } = payload;
+      
+      log({ event: 'task_start_received', orderId, requesterDid });
+      
+      // Forward to executor
+      if (!EXECUTOR_URL) {
+        log({ event: 'task_start_no_executor', orderId });
+        res.status(500).json({ error: 'no executor configured' });
+        return;
+      }
+
+      // Register task in pendingTasks
+      pendingTasks[orderId] = {
+        from: requesterDid,
+        action: capabilityType,
+        acceptedAt: new Date().toISOString(),
+        encrypted: false
+      };
+      saveTasks(pendingTasks);
+
+      // Forward to executor with toolProxy
+      try {
+        const execResp = await fetch(EXECUTOR_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskId: orderId,
+            from: requesterDid,
+            action: capabilityType,
+            payload: { orderId, priceAmount },
+            toolProxy: `http://127.0.0.1:${toolProxyPort}`
+          })
+        });
+
+        if (execResp.ok) {
+          log({ event: 'task_forwarded_to_executor', orderId });
+          res.json({ status: 'forwarded', orderId });
+        } else {
+          const error = await execResp.text();
+          log({ event: 'task_forward_failed', orderId, error });
+          res.status(500).json({ error: 'forward failed: ' + error });
+        }
+      } catch (err) {
+        log({ event: 'task_forward_error', orderId, error: err.message });
+        res.status(500).json({ error: err.message });
+      }
+      return;
+    }
+
+    // Unknown event type
+    res.json({ status: 'ignored', event });
   });
 
   // Result callback: POST /atel/v1/result (executor calls this when done)
