@@ -390,11 +390,15 @@ async function startToolGatewayProxy(port, identity, policy) {
       ctx.trace.fail(new Error(result?.error || 'Task failed'));
     }
 
-    // Export trace data
-    const traceData = ctx.trace.export();
+    // Return trace as object with events array
+    const traceObj = {
+      events: ctx.trace.events,
+      taskId: ctx.trace.taskId,
+      executor: ctx.trace.identity.did,
+    };
     taskGateways.delete(taskId);
 
-    res.json({ status: 'finalized', trace: traceData });
+    res.json({ status: 'finalized', trace: traceObj });
   });
 
   // GET /trace/:taskId - Get current trace
