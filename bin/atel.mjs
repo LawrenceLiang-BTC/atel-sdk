@@ -51,7 +51,7 @@ import {
   createMessage, RegistryClient, ExecutionTrace, ProofGenerator,
   SolanaAnchorProvider, autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
-  RollbackManager, rotateKey, verifyKeyRotation,
+  RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
