@@ -300,6 +300,111 @@ async function cmdVerify() {
   if (result.reachable) { net.reachable = true; net.needsManualPortForward = false; saveNetwork(net); }
 }
 
+/**
+ * Start ToolGateway proxy server for verifiable execution.
+ * All executor tool calls must go through this proxy to be recorded in trace.
+ */
+async function startToolGatewayProxy(port, identity, policy) {
+  const { default: express } = await import('express');
+  const app = express();
+  app.use(express.json({ limit: '10mb' }));
+
+  // Each task has its own gateway + trace
+  const taskGateways = new Map();
+
+  // POST /init - Initialize task gateway
+  app.post('/init', (req, res) => {
+    const { taskId } = req.body;
+    if (!taskId) { res.status(400).json({ error: 'taskId required' }); return; }
+
+    const trace = new ExecutionTrace(taskId, identity);
+    const gateway = new ToolGateway(policy, { trace });
+
+    taskGateways.set(taskId, { gateway, trace, tools: new Map() });
+    res.json({ status: 'initialized', taskId, proxyUrl: `http://127.0.0.1:${port}` });
+  });
+
+  // POST /register - Register tool endpoint
+  app.post('/register', async (req, res) => {
+    const { taskId, tool, endpoint } = req.body;
+    if (!taskId || !tool || !endpoint) {
+      res.status(400).json({ error: 'taskId, tool, endpoint required' });
+      return;
+    }
+
+    const ctx = taskGateways.get(taskId);
+    if (!ctx) { res.status(404).json({ error: 'Task not initialized' }); return; }
+
+    // Register tool: calls executor-provided endpoint
+    ctx.gateway.registerTool(tool, async (input) => {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool, input }),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (!resp.ok) throw new Error(`Tool ${tool} failed: ${resp.status}`);
+      return await resp.json();
+    });
+
+    ctx.tools.set(tool, endpoint);
+    res.json({ status: 'registered', tool });
+  });
+
+  // POST /call - Call tool through gateway
+  app.post('/call', async (req, res) => {
+    const { taskId, tool, input, risk_level, data_scope } = req.body;
+    if (!taskId || !tool) {
+      res.status(400).json({ error: 'taskId and tool required' });
+      return;
+    }
+
+    const ctx = taskGateways.get(taskId);
+    if (!ctx) { res.status(404).json({ error: 'Task not initialized' }); return; }
+
+    try {
+      const result = await ctx.gateway.callTool({ tool, input, risk_level, data_scope });
+      res.json(result);
+    } catch (e) {
+      res.status(400).json({ error: e.message, type: e.name });
+    }
+  });
+
+  // POST /finalize - Finalize task, return trace
+  app.post('/finalize', (req, res) => {
+    const { taskId, success, result } = req.body;
+    if (!taskId) { res.status(400).json({ error: 'taskId required' }); return; }
+
+    const ctx = taskGateways.get(taskId);
+    if (!ctx) { res.status(404).json({ error: 'Task not initialized' }); return; }
+
+    if (success) {
+      ctx.trace.finalize(result || {});
+    } else {
+      ctx.trace.fail(new Error(result?.error || 'Task failed'));
+    }
+
+    // Export trace data
+    const traceData = ctx.trace.export();
+    taskGateways.delete(taskId);
+
+    res.json({ status: 'finalized', trace: traceData });
+  });
+
+  // GET /trace/:taskId - Get current trace
+  app.get('/trace/:taskId', (req, res) => {
+    const ctx = taskGateways.get(req.params.taskId);
+    if (!ctx) { res.status(404).json({ error: 'Task not found' }); return; }
+    res.json({ trace: ctx.trace.export() });
+  });
+
+  return new Promise((resolve) => {
+    const server = app.listen(port, '127.0.0.1', () => {
+      resolve({ server, port, taskGateways });
+    });
+  });
+}
+
 async function cmdStart(port) {
   const id = requireIdentity();
   const p = parseInt(port || '3100');
@@ -323,6 +428,11 @@ async function cmdStart(port) {
 
   // ── Start endpoint ──
   const endpoint = new AgentEndpoint(id, { port: p, host: '0.0.0.0' });
+
+  // ── Start ToolGateway Proxy Server ──
+  const toolProxyPort = p + 1;
+  const toolGatewayServer = await startToolGatewayProxy(toolProxyPort, id, policy);
+  log({ event: 'tool_gateway_started', port: toolProxyPort });
 
   // ── Trust Score Client ──
   const trustScoreClient = new TrustScoreClient();
@@ -356,21 +466,34 @@ async function cmdStart(port) {
 
   // Result callback: POST /atel/v1/result (executor calls this when done)
   endpoint.app?.post?.('/atel/v1/result', async (req, res) => {
-    const { taskId, result, success } = req.body || {};
+    const { taskId, result, success, trace: executorTrace } = req.body || {};
     if (!taskId || !pendingTasks[taskId]) { res.status(404).json({ error: 'Unknown taskId' }); return; }
     const task = pendingTasks[taskId];
     const startTime = new Date(task.acceptedAt).getTime();
     const durationMs = Date.now() - startTime;
     enforcer.taskFinished();
 
-    // ── Execution Trace (detailed) ──
-    const trace = new ExecutionTrace(taskId, id);
-    trace.append('TASK_RECEIVED', { from: task.from, action: task.action, encrypted: task.encrypted });
-    trace.append('POLICY_CHECK', { rateLimit: policy.rateLimit, maxConcurrent: policy.maxConcurrent, result: 'allowed' });
-    trace.append('CAPABILITY_CHECK', { action: task.action, capabilities: capTypes, result: 'allowed' });
-    trace.append('CONTENT_AUDIT', { result: 'passed' });
-    trace.append('TASK_FORWARDED', { executor_url: EXECUTOR_URL, timestamp: task.acceptedAt });
-    trace.append('EXECUTOR_RESULT', { success: success !== false, duration_ms: durationMs, result_size: JSON.stringify(result).length });
+    // ── Execution Trace ──
+    let trace;
+    if (executorTrace && executorTrace.events && Array.isArray(executorTrace.events)) {
+      // Use executor-provided trace (from ToolGateway)
+      trace = new ExecutionTrace(taskId, id);
+      // Import events from executor trace
+      for (const event of executorTrace.events) {
+        trace.events.push(event);
+      }
+      log({ event: 'trace_imported', taskId, event_count: executorTrace.events.length, has_tool_calls: executorTrace.events.some(e => e.type === 'TOOL_CALL') });
+    } else {
+      // Fallback: simple trace (for executors without ToolGateway integration)
+      trace = new ExecutionTrace(taskId, id);
+      trace.append('TASK_RECEIVED', { from: task.from, action: task.action, encrypted: task.encrypted });
+      trace.append('POLICY_CHECK', { rateLimit: policy.rateLimit, maxConcurrent: policy.maxConcurrent, result: 'allowed' });
+      trace.append('CAPABILITY_CHECK', { action: task.action, capabilities: capTypes, result: 'allowed' });
+      trace.append('CONTENT_AUDIT', { result: 'passed' });
+      trace.append('TASK_FORWARDED', { executor_url: EXECUTOR_URL, timestamp: task.acceptedAt });
+      trace.append('EXECUTOR_RESULT', { success: success !== false, duration_ms: durationMs, result_size: JSON.stringify(result).length });
+      log({ event: 'trace_fallback', taskId, warning: 'Executor did not provide trace, using simple trace' });
+    }
 
     // ── Rollback on failure ──
     let rollbackReport = null;
@@ -591,7 +714,7 @@ async function cmdStart(port) {
 
     // Forward to executor or echo
     if (EXECUTOR_URL) {
-      fetch(EXECUTOR_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, from: message.from, action, payload, encrypted: !!session?.encrypted }) }).catch(e => log({ event: 'executor_forward_failed', taskId, error: e.message }));
+      fetch(EXECUTOR_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, from: message.from, action, payload, encrypted: !!session?.encrypted, toolProxy: `http://127.0.0.1:${toolProxyPort}` }) }).catch(e => log({ event: 'executor_forward_failed', taskId, error: e.message }));
       return { status: 'accepted', taskId, message: 'Task accepted. Result will be pushed when ready.' };
     } else {
       // Echo mode
