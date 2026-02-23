@@ -713,6 +713,7 @@ async function cmdStart(port) {
             proofBundle: proof,
             traceRoot: proof.trace_root,
             anchorTx: anchor?.txHash || null,
+            traceEvents: trace.events, // Include trace events for verification
           };
           const signPayload = { did: id.did, timestamp, payload };
           const signature = sign(signPayload, id.secretKey);
