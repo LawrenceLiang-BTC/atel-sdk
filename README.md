@@ -92,7 +92,7 @@ ATEL skill package: `skills/atel/SKILL.md`
 ### Module 1: Identity
 
 ```typescript
-import { AgentIdentity, generateKeyPair, createDID, sign, verify } from '@lawreneliang/atel-sdk';
+import { AgentIdentity, generateKeyPair, createDID, sign, verify } from '@lawrenceliang-btc/atel-sdk';
 
 const agent = new AgentIdentity();
 console.log(agent.did);           // "did:atel:..."
@@ -103,7 +103,7 @@ const ok = agent.verify(payload, sig);
 ### Module 2: Schema
 
 ```typescript
-import { createTask, createCapability, matchTaskToCapability } from '@lawreneliang/atel-sdk';
+import { createTask, createCapability, matchTaskToCapability } from '@lawrenceliang-btc/atel-sdk';
 
 const task = createTask({
   issuer: agent.did,
@@ -122,7 +122,7 @@ const match = matchTaskToCapability(task, cap);
 ### Module 3: Policy
 
 ```typescript
-import { mintConsentToken, verifyConsentToken, PolicyEngine } from '@lawreneliang/atel-sdk';
+import { mintConsentToken, verifyConsentToken, PolicyEngine } from '@lawrenceliang-btc/atel-sdk';
 
 const token = mintConsentToken(
   issuer.did, executor.did,
@@ -141,7 +141,7 @@ const decision = engine.evaluate(action);  // 'allow' | 'deny' | 'needs_confirm'
 ### Module 4: Gateway
 
 ```typescript
-import { ToolGateway } from '@lawreneliang/atel-sdk';
+import { ToolGateway } from '@lawrenceliang-btc/atel-sdk';
 
 const gateway = new ToolGateway(policyEngine);
 gateway.registerTool('http.get', async (input) => { /* ... */ });
@@ -157,7 +157,7 @@ const result = await gateway.callTool({
 ### Module 5: Trace
 
 ```typescript
-import { ExecutionTrace } from '@lawreneliang/atel-sdk';
+import { ExecutionTrace } from '@lawrenceliang-btc/atel-sdk';
 
 const trace = new ExecutionTrace(taskId, agentIdentity);
 trace.append('TASK_ACCEPTED', { ... });
@@ -170,7 +170,7 @@ const { valid, errors } = trace.verify();
 ### Module 6: Proof
 
 ```typescript
-import { ProofGenerator, ProofVerifier } from '@lawreneliang/atel-sdk';
+import { ProofGenerator, ProofVerifier } from '@lawrenceliang-btc/atel-sdk';
 
 const gen = new ProofGenerator(trace, identity);
 const bundle = gen.generate(policyRef, consentRef, resultRef);
@@ -182,7 +182,7 @@ const report = ProofVerifier.verify(bundle, { trace });
 ### Module 7: Score
 
 ```typescript
-import { TrustScoreClient } from '@lawreneliang/atel-sdk';
+import { TrustScoreClient } from '@lawrenceliang-btc/atel-sdk';
 
 const client = new TrustScoreClient();
 client.submitExecutionSummary({ executor: did, task_id, success: true, ... });
