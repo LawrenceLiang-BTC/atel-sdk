@@ -503,7 +503,7 @@ async function cmdStart(port) {
       
       // Call platform API to accept
       try {
-        const timestamp = Date.now().toString();
+        const timestamp = new Date().toISOString(); // RFC3339 format
         const payload = {}; // Empty payload for accept
         const signPayload = { did: id.did, timestamp, payload };
         const signature = sign(signPayload, id.secretKey);
