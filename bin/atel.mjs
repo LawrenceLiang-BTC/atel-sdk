@@ -319,18 +319,12 @@ async function startToolGatewayProxy(port, identity, policy) {
 
     const trace = new ExecutionTrace(taskId, identity);
     
-    // Create a permissive ConsentToken for this task
-    const consent = mintConsentToken(
-      identity.did,
-      identity.did,
-      ['tool:*', 'data:*'],
-      policy.rateLimit || 100,
-      3600,
-      identity.secretKey
-    );
-    const taskPolicy = new PolicyEngine(consent);
+    // Create a permissive policy adapter (allow all tools)
+    const permissivePolicy = {
+      evaluate: (action, context) => ({ decision: 'allow' }),
+    };
     
-    const gateway = new ToolGateway(taskPolicy, { trace });
+    const gateway = new ToolGateway(permissivePolicy, { trace });
 
     taskGateways.set(taskId, { gateway, trace, tools: new Map() });
     res.json({ status: 'initialized', taskId, proxyUrl: `http://127.0.0.1:${port}` });
