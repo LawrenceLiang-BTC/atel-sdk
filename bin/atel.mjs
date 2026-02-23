@@ -504,17 +504,21 @@ async function cmdStart(port) {
       // Call platform API to accept
       try {
         const timestamp = Date.now().toString();
-        const signPayload = { orderId, timestamp };
+        const payload = {}; // Empty payload for accept
+        const signPayload = { did: id.did, timestamp, payload };
         const signature = sign(signPayload, id.secretKey);
+        
+        const signedRequest = {
+          did: id.did,
+          timestamp,
+          signature,
+          payload
+        };
         
         const acceptResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/accept`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-DID': id.did,
-            'X-Timestamp': timestamp,
-            'X-Signature': signature
-          }
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(signedRequest)
         });
         
         if (acceptResp.ok) {
