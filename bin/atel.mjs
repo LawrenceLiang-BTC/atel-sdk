@@ -53,6 +53,7 @@ import {
   autoNetworkSetup, collectCandidates, connectToAgent,
   discoverPublicIP, checkReachable, ContentAuditor, TrustScoreClient,
   RollbackManager, rotateKey, verifyKeyRotation, ToolGateway, PolicyEngine, mintConsentToken, sign,
+  TrustGraph, calculateTaskWeight,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
 
@@ -66,6 +67,8 @@ let EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
 const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
 const TASKS_FILE = resolve(ATEL_DIR, 'tasks.json');
+const SCORE_FILE = resolve(ATEL_DIR, 'trust-scores.json');
+const GRAPH_FILE = resolve(ATEL_DIR, 'trust-graph.json');
 const NETWORK_FILE = resolve(ATEL_DIR, 'network.json');
 const TRACES_DIR = resolve(ATEL_DIR, 'traces');
 
@@ -510,8 +513,47 @@ async function cmdStart(port) {
     }
   }
 
-  // ── Trust Score Client ──
+  // ── Trust Score Client (persistent) ──
   const trustScoreClient = new TrustScoreClient();
+  // Load saved proof records
+  try {
+    const saved = JSON.parse(readFileSync(SCORE_FILE, 'utf-8'));
+    if (saved.proofRecords) {
+      for (const r of saved.proofRecords) trustScoreClient.addProofRecord(r);
+    }
+    if (saved.summaries) {
+      for (const s of saved.summaries) trustScoreClient.submitExecutionSummary(s);
+    }
+    log({ event: 'trust_scores_loaded', records: (saved.proofRecords || []).length, summaries: (saved.summaries || []).length });
+  } catch {}
+  // Accumulated records for persistence
+  const _proofRecords = [];
+  const _summaries = [];
+  try {
+    const saved = JSON.parse(readFileSync(SCORE_FILE, 'utf-8'));
+    if (saved.proofRecords) _proofRecords.push(...saved.proofRecords);
+    if (saved.summaries) _summaries.push(...saved.summaries);
+  } catch {}
+  function saveTrustScores() {
+    try { writeFileSync(SCORE_FILE, JSON.stringify({ proofRecords: _proofRecords, summaries: _summaries }, null, 2)); } catch {}
+  }
+
+  // ── Trust Graph (persistent) ──
+  const trustGraph = new TrustGraph();
+  const _interactions = [];
+  try {
+    const saved = JSON.parse(readFileSync(GRAPH_FILE, 'utf-8'));
+    if (saved.interactions) {
+      for (const i of saved.interactions) {
+        trustGraph.recordInteraction(i);
+      }
+      _interactions.push(...saved.interactions);
+    }
+    log({ event: 'trust_graph_loaded', interactions: _interactions.length, stats: trustGraph.getStats() });
+  } catch {}
+  function saveTrustGraph() {
+    try { writeFileSync(GRAPH_FILE, JSON.stringify({ interactions: _interactions, exported: trustGraph.exportGraph() }, null, 2)); } catch {}
+  }
 
   // ── Nonce Store (anti-replay) ──
   const nonceFile = join(ATEL_DIR, 'nonces.json');
@@ -766,13 +808,13 @@ async function cmdStart(port) {
     // ── On-chain Anchoring ──
     const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, executorDid: id.did, requesterDid: task.from, taskId, action: task.action }, task.chain);
 
-    // ── Trust Score Update ──
+    // ── Trust Score Update (always, with or without anchor) ──
     try {
       if (anchor?.txHash) {
-        trustScoreClient.addProofRecord({
+        const proofRecord = {
           traceRoot: proof.trace_root,
           txHash: anchor.txHash,
-          chain: 'solana',
+          chain: anchor.chain || 'solana',
           executor: id.did,
           taskFrom: task.from,
           action: task.action,
@@ -783,28 +825,69 @@ async function cmdStart(port) {
           proofId: proof.proof_id,
           timestamp: new Date().toISOString(),
           verified: true,
-        });
-        const scoreReport = trustScoreClient.getAgentScore(id.did);
-        log({ event: 'trust_score_updated', did: id.did, score: scoreReport.trust_score, total_tasks: scoreReport.total_tasks, success_rate: scoreReport.success_rate });
-
-        // Update score on Registry (direct API call)
-        try {
-          const { serializePayload } = await import('@lawreneliang/atel-sdk');
-          const ts = new Date().toISOString();
-          const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
-          const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
-          const { default: nacl } = await import('tweetnacl');
-          const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
-          await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
-            signal: AbortSignal.timeout(5000),
-          });
-        } catch (e) { log({ event: 'score_registry_update_failed', error: e.message }); }
+        };
+        trustScoreClient.addProofRecord(proofRecord);
+        _proofRecords.push(proofRecord);
       } else {
-        log({ event: 'trust_score_skipped', reason: 'No on-chain anchor — score requires verified proof' });
+        // No anchor — still record as legacy summary so score accumulates
+        const summary = {
+          executor: id.did,
+          task_id: taskId,
+          task_type: task.action || 'general',
+          risk_level: 'low',
+          success: success !== false,
+          duration_ms: durationMs,
+          tool_calls: trace.events.filter(e => e.type === 'TOOL_CALL').length,
+          policy_violations: 0,
+          proof_id: proof.proof_id,
+          timestamp: new Date().toISOString(),
+        };
+        trustScoreClient.submitExecutionSummary(summary);
+        _summaries.push(summary);
+        log({ event: 'trust_score_updated_no_anchor', reason: 'No on-chain anchor — recorded as unverified. Set ATEL_SOLANA_PRIVATE_KEY for verified proofs.' });
       }
+      const scoreReport = trustScoreClient.getAgentScore(id.did);
+      log({ event: 'trust_score_updated', did: id.did, score: scoreReport.trust_score, total_tasks: scoreReport.total_tasks, success_rate: scoreReport.success_rate, verified_count: scoreReport.verified_count });
+      saveTrustScores();
+
+      // Update score on Registry
+      try {
+        const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
+        const ts = new Date().toISOString();
+        const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
+        const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
+        const { default: nacl } = await import('tweetnacl');
+        const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+        await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch (e) { log({ event: 'score_registry_update_failed', error: e.message }); }
     } catch (e) { log({ event: 'trust_score_error', error: e.message }); }
+
+    // ── Trust Graph Update ──
+    try {
+      const interaction = {
+        from: task.from,
+        to: id.did,
+        scene: task.action || 'general',
+        success: success !== false,
+        task_weight: calculateTaskWeight({
+          tool_calls: trace.events.filter(e => e.type === 'TOOL_CALL').length,
+          duration_ms: durationMs,
+          max_cost: 1,
+          risk_level: 'low',
+          similar_task_count: _interactions.filter(i => i.from === task.from && i.scene === (task.action || 'general')).length,
+        }),
+        duration_ms: durationMs,
+      };
+      trustGraph.recordInteraction(interaction);
+      _interactions.push(interaction);
+      saveTrustGraph();
+      const graphStats = trustGraph.getStats();
+      log({ event: 'trust_graph_updated', from: task.from, to: id.did, scene: task.action, nodes: graphStats.total_nodes, edges: graphStats.total_edges, interactions: graphStats.total_interactions });
+    } catch (e) { log({ event: 'trust_graph_error', error: e.message }); }
 
     // ── Anchoring Warning ──
     if (!anchor) {
@@ -1019,7 +1102,42 @@ async function cmdStart(port) {
       const proofGen = new ProofGenerator(trace, id);
       const proof = proofGen.generate(capTypes.join(',') || 'no-policy', `task-from-${message.from}`, JSON.stringify(result));
       const anchor = await anchorOnChain(proof.trace_root, { proof_id: proof.proof_id, task_from: message.from, action, taskId });
+      const echoAcceptedAt = pendingTasks[taskId]?.acceptedAt;
       delete pendingTasks[taskId]; saveTasks(pendingTasks);
+
+      // ── Trust Score + Graph Update (echo mode) ──
+      try {
+        const echoSuccess = true;
+        const echoDurationMs = Date.now() - new Date(echoAcceptedAt || Date.now()).getTime();
+        if (anchor?.txHash) {
+          const proofRecord = {
+            traceRoot: proof.trace_root, txHash: anchor.txHash, chain: anchor.chain || 'solana',
+            executor: id.did, taskFrom: message.from, action, success: echoSuccess,
+            durationMs: echoDurationMs, riskLevel: 'low', policyViolations: 0,
+            proofId: proof.proof_id, timestamp: new Date().toISOString(), verified: true,
+          };
+          trustScoreClient.addProofRecord(proofRecord);
+          _proofRecords.push(proofRecord);
+        } else {
+          const summary = {
+            executor: id.did, task_id: taskId, task_type: action || 'general',
+            risk_level: 'low', success: echoSuccess, duration_ms: echoDurationMs,
+            tool_calls: 0, policy_violations: 0, proof_id: proof.proof_id,
+            timestamp: new Date().toISOString(),
+          };
+          trustScoreClient.submitExecutionSummary(summary);
+          _summaries.push(summary);
+        }
+        saveTrustScores();
+        const interaction = {
+          from: message.from, to: id.did, scene: action || 'general',
+          success: echoSuccess, task_weight: 0.1, duration_ms: echoDurationMs,
+        };
+        trustGraph.recordInteraction(interaction);
+        _interactions.push(interaction);
+        saveTrustGraph();
+      } catch (e) { log({ event: 'trust_update_error_echo', error: e.message }); }
+
       log({ event: 'task_completed', taskId, from: message.from, action, mode: 'echo', proof_id: proof.proof_id, anchor_tx: anchor?.txHash || null, timestamp: new Date().toISOString() });
       return { status: 'completed', taskId, result, proof, anchor };
     }
@@ -1943,46 +2061,57 @@ async function cmdComplete(orderId, taskId) {
     }
   }
 
-  // ── Trust Score Update ──
+  // ── Trust Score Update (persistent, with or without anchor) ──
   try {
-    if (anchor?.txHash) {
-      const trustScoreClient = new TrustScoreClient();
-      trustScoreClient.addProofRecord({
-        traceRoot: proof.trace_root,
-        txHash: anchor.txHash,
-        chain: 'solana',
-        executor: id.did,
-        taskFrom: requesterDid,
-        action: 'cli-complete',
-        success: true,
-        durationMs: 0,
-        riskLevel: 'low',
-        policyViolations: 0,
-        proofId: proof.proof_id,
-        timestamp: new Date().toISOString(),
-        verified: true,
-      });
-      const scoreReport = trustScoreClient.getAgentScore(id.did);
-      console.error(`[complete] Trust score updated: ${scoreReport.trust_score} (tasks: ${scoreReport.total_tasks})`);
+    const trustScoreClient = new TrustScoreClient();
+    // Load existing records
+    try {
+      const saved = JSON.parse(readFileSync(SCORE_FILE, 'utf-8'));
+      if (saved.proofRecords) for (const r of saved.proofRecords) trustScoreClient.addProofRecord(r);
+      if (saved.summaries) for (const s of saved.summaries) trustScoreClient.submitExecutionSummary(s);
+    } catch {}
+    const _pr = []; const _sm = [];
+    try { const saved = JSON.parse(readFileSync(SCORE_FILE, 'utf-8')); if (saved.proofRecords) _pr.push(...saved.proofRecords); if (saved.summaries) _sm.push(...saved.summaries); } catch {}
 
-      // ── Push score to Registry ──
-      try {
-        const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
-        const ts = new Date().toISOString();
-        const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
-        const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
-        const { default: nacl } = await import('tweetnacl');
-        const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
-        await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
-          signal: AbortSignal.timeout(5000),
-        });
-        console.error(`[complete] Score pushed to Registry: ${scoreReport.trust_score}`);
-      } catch (e) { console.error(`[complete] Registry score push failed: ${e.message}`); }
+    if (anchor?.txHash) {
+      const proofRecord = {
+        traceRoot: proof.trace_root, txHash: anchor.txHash, chain: anchor.chain || 'solana',
+        executor: id.did, taskFrom: requesterDid, action: 'cli-complete',
+        success: true, durationMs: 0, riskLevel: 'low', policyViolations: 0,
+        proofId: proof.proof_id, timestamp: new Date().toISOString(), verified: true,
+      };
+      trustScoreClient.addProofRecord(proofRecord);
+      _pr.push(proofRecord);
     } else {
-      console.error('[complete] Trust score skipped: no on-chain anchor');
+      const summary = {
+        executor: id.did, task_id: effectiveTaskId, task_type: 'cli-complete',
+        risk_level: 'low', success: true, duration_ms: 0, tool_calls: 0,
+        policy_violations: 0, proof_id: proof.proof_id, timestamp: new Date().toISOString(),
+      };
+      trustScoreClient.submitExecutionSummary(summary);
+      _sm.push(summary);
+      console.error('[complete] Trust score updated (unverified — no on-chain anchor)');
     }
+    try { writeFileSync(SCORE_FILE, JSON.stringify({ proofRecords: _pr, summaries: _sm }, null, 2)); } catch {}
+
+    const scoreReport = trustScoreClient.getAgentScore(id.did);
+    console.error(`[complete] Trust score: ${scoreReport.trust_score} (tasks: ${scoreReport.total_tasks}, verified: ${scoreReport.verified_count})`);
+
+    // ── Push score to Registry ──
+    try {
+      const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
+      const ts = new Date().toISOString();
+      const scorePayload = { did: id.did, trustScore: scoreReport.trust_score };
+      const signable = serializePayload({ payload: scorePayload, did: id.did, timestamp: ts });
+      const { default: nacl } = await import('tweetnacl');
+      const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+      await fetch(`${REGISTRY_URL}/registry/v1/score/update`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload: scorePayload, did: id.did, timestamp: ts, signature: sig }),
+        signal: AbortSignal.timeout(5000),
+      });
+      console.error(`[complete] Score pushed to Registry: ${scoreReport.trust_score}`);
+    } catch (e) { console.error(`[complete] Registry score push failed: ${e.message}`); }
   } catch (e) { console.error(`[complete] Trust score error: ${e.message}`); }
 
   // Attach proof + anchor to payload
