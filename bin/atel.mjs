@@ -1864,9 +1864,14 @@ async function cmdDeposit(amount, channel) {
   console.log(JSON.stringify(data, null, 2));
 }
 
-async function cmdWithdraw(amount, channel) {
-  if (!amount || isNaN(amount)) { console.error('Usage: atel withdraw <amount> [channel]'); process.exit(1); }
-  const data = await signedFetch('POST', '/account/v1/withdraw', { amount: parseFloat(amount), channel: channel || 'manual' });
+async function cmdWithdraw(amount, channel, address) {
+  if (!amount || isNaN(amount)) { console.error('Usage: atel withdraw <amount> [channel] [address]'); process.exit(1); }
+  if (channel && channel.startsWith('crypto_') && !address) {
+    console.error('Error: recipient wallet address required for crypto withdrawal');
+    console.error('Usage: atel withdraw <amount> crypto_base <your_wallet_address>');
+    process.exit(1);
+  }
+  const data = await signedFetch('POST', '/account/v1/withdraw', { amount: parseFloat(amount), channel: channel || 'manual', address: address || '' });
   console.log(JSON.stringify(data, null, 2));
 }
 
@@ -2240,7 +2245,7 @@ const commands = {
   // Account
   balance: () => cmdBalance(),
   deposit: () => cmdDeposit(args[0], args[1]),
-  withdraw: () => cmdWithdraw(args[0], args[1]),
+  withdraw: () => cmdWithdraw(args[0], args[1], args[2]),
   transactions: () => cmdTransactions(),
   // Trade
   'trade-task': () => cmdTradeTask(args[0], args.slice(1).join(' ')),
@@ -2293,7 +2298,7 @@ Protocol Commands:
 Account Commands:
   balance                              Show platform account balance
   deposit <amount> [channel]           Deposit funds (channel: manual|crypto_sol|stripe|alipay)
-  withdraw <amount> [channel]          Withdraw funds
+  withdraw <amount> [channel] [address] Withdraw funds (address required for crypto)
   transactions                         List payment history
 
 Trade Commands:
