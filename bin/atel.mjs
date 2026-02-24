@@ -390,7 +390,7 @@ async function startToolGatewayProxy(port, identity, policy) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool, input }),
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(180000),
       });
       if (!resp.ok) throw new Error(`Tool ${tool} failed: ${resp.status}`);
       return await resp.json();
