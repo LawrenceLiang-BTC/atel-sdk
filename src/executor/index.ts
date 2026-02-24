@@ -155,6 +155,20 @@ export class BuiltinExecutor {
       res.json({ status: 'ok', type: 'builtin-executor', gateway: this.config.gatewayUrl, hasContext: !!this.agentContext });
     });
 
+    // Internal endpoint for ToolGateway to call back into executor
+    this.app.post('/internal/openclaw_agent', async (req, res) => {
+      const { tool, input } = req.body;
+      try {
+        const prompt = input?.prompt || input?.text || JSON.stringify(input);
+        const taskId = input?.taskId || `internal-${Date.now()}`;
+        const result = await this.executeDirect(prompt, taskId);
+        res.json(result);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        res.status(500).json({ error: msg });
+      }
+    });
+
     this.app.post('/', async (req, res) => {
       const { taskId, from, action, payload, toolProxy } = req.body as TaskRequest;
       this.log({ event: 'task_received', taskId, from, action, toolProxy: toolProxy || 'none' });
@@ -179,6 +193,17 @@ export class BuiltinExecutor {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ taskId }),
         });
+        // Register openclaw_agent tool so ToolGateway can record trace
+        await fetch(`${toolProxy}/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskId,
+            tool: 'openclaw_agent',
+            endpoint: `http://127.0.0.1:${this.config.port}/internal/openclaw_agent`,
+          }),
+        });
+        this.log({ event: 'toolgateway_registered', taskId, tool: 'openclaw_agent' });
       }
 
       // ── Security audit ──
