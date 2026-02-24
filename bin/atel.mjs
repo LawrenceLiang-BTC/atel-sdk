@@ -607,7 +607,7 @@ async function cmdStart(port) {
 
     if (event === 'task_start') {
       // Task execution notification - forward to executor
-      const { orderId, requesterDid, capabilityType, priceAmount, chain } = payload;
+      const { orderId, requesterDid, capabilityType, priceAmount, chain, description } = payload;
       
       log({ event: 'task_start_received', orderId, requesterDid, chain });
       
@@ -643,7 +643,7 @@ async function cmdStart(port) {
               taskId: orderId,
               from: requesterDid,
               action: capabilityType,
-              payload: { orderId, priceAmount },
+              payload: { orderId, priceAmount, text: description || '' },
               toolProxy: `http://127.0.0.1:${toolProxyPort}`,
               callbackUrl: `http://127.0.0.1:${p}/atel/v1/result`
             }),
