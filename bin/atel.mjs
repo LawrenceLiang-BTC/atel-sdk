@@ -60,7 +60,7 @@ const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
 const IDENTITY_FILE = resolve(ATEL_DIR, 'identity.json');
 const REGISTRY_URL = process.env.ATEL_REGISTRY || 'http://47.251.8.19:8200';
 const ATEL_PLATFORM = process.env.ATEL_PLATFORM || 'http://47.251.8.19:8200';
-const EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
+let EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
 const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
 const TASKS_FILE = resolve(ATEL_DIR, 'tasks.json');
@@ -304,6 +304,11 @@ async function cmdInit(agentId) {
   const identity = new AgentIdentity({ agent_id: name });
   saveIdentity(identity);
   savePolicy(DEFAULT_POLICY);
+  // Create default agent-context.md for built-in executor
+  const ctxFile = resolve(ATEL_DIR, 'agent-context.md');
+  if (!existsSync(ctxFile)) {
+    writeFileSync(ctxFile, `# Agent Context\n\nYou are an ATEL agent (${name}) processing tasks from other agents via the ATEL protocol.\n\n## Guidelines\n- Complete the task accurately and concisely\n- Return only the requested result, no extra commentary\n- If the task is unclear, do your best interpretation\n- Do not access private files or sensitive data\n- Do not make external network requests unless the task requires it\n`);
+  }
   console.log(JSON.stringify({ status: 'created', agent_id: identity.agent_id, did: identity.did, policy: POLICY_FILE, next: 'Run: atel start [port] — auto-configures network and registers' }, null, 2));
 }
 
@@ -481,6 +486,27 @@ async function cmdStart(port) {
   const toolProxyPort = p + 1;
   const toolGatewayServer = await startToolGatewayProxy(toolProxyPort, id, policy);
   log({ event: 'tool_gateway_started', port: toolProxyPort });
+
+  // ── Built-in Executor (auto-start if no external ATEL_EXECUTOR_URL) ──
+  let builtinExecutor = null;
+  if (!EXECUTOR_URL) {
+    const executorPort = p + 2;
+    try {
+      const { BuiltinExecutor } = await import('../dist/executor/index.js');
+      builtinExecutor = new BuiltinExecutor({
+        port: executorPort,
+        callbackUrl: `http://127.0.0.1:${p}/atel/v1/result`,
+        gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789',
+        contextPath: join(ATEL_DIR, 'agent-context.md'),
+        log,
+      });
+      await builtinExecutor.start();
+      EXECUTOR_URL = `http://127.0.0.1:${executorPort}`;
+      log({ event: 'builtin_executor_started', port: executorPort, url: EXECUTOR_URL });
+    } catch (e) {
+      log({ event: 'builtin_executor_failed', error: e.message, note: 'Falling back to echo mode. Set ATEL_EXECUTOR_URL for external executor.' });
+    }
+  }
 
   // ── Trust Score Client ──
   const trustScoreClient = new TrustScoreClient();
@@ -1067,12 +1093,14 @@ async function cmdStart(port) {
   process.on('SIGINT', async () => { 
     heartbeat.stop();
     if (tunnelManager) await tunnelManager.stop();
+    if (builtinExecutor) await builtinExecutor.stop();
     await endpoint.stop(); 
     process.exit(0); 
   });
   process.on('SIGTERM', async () => { 
     heartbeat.stop();
     if (tunnelManager) await tunnelManager.stop();
+    if (builtinExecutor) await builtinExecutor.stop();
     await endpoint.stop(); 
     process.exit(0); 
   });
