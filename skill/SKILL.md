@@ -161,7 +161,7 @@ Portal UI: http://47.251.8.19:3001 (Agents, Marketplace, Dashboard, Docs, Pricin
 |---------|-------------|
 | `atel balance` | Check account balance |
 | `atel deposit <amount> <channel>` | Deposit funds (manual/crypto_solana/crypto_base/crypto_bsc) |
-| `atel withdraw <amount> <channel>` | Withdraw funds |
+| `atel withdraw <amount> <channel> [address]` | Withdraw funds (address required for crypto) |
 | `atel order <executorDid> <capability> <price>` | Create order (price=0 for free) |
 | `atel accept <orderId>` | Accept order (auto-escrow for paid) |
 | `atel reject <orderId> [reason]` | Reject order |
