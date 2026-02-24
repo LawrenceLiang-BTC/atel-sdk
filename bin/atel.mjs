@@ -1785,9 +1785,10 @@ async function cmdTradeTask(capability, description) {
 }
 
 async function cmdOrder(executorDid, capType, price) {
-  if (!executorDid || !capType || !price) { console.error('Usage: atel order <executorDid> <capabilityType> <price> [currency]'); process.exit(1); }
+  if (!executorDid || !capType || !price) { console.error('Usage: atel order <executorDid> <capabilityType> <price> [--desc "task description"]'); process.exit(1); }
+  const description = rawArgs.find((a, i) => rawArgs[i-1] === '--desc') || '';
   const data = await signedFetch('POST', '/trade/v1/order', {
-    executorDid, capabilityType: capType, priceAmount: parseFloat(price), priceCurrency: 'USD', pricingModel: 'per_task',
+    executorDid, capabilityType: capType, priceAmount: parseFloat(price), priceCurrency: 'USD', pricingModel: 'per_task', description,
   });
   console.log(JSON.stringify(data, null, 2));
 }
