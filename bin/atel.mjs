@@ -1328,7 +1328,8 @@ async function cmdTask(target, taskJson) {
     console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: 'relay', relay_ack: relayAck, note: 'Relay mode is async. Waiting for result (up to 120s)...' }));
 
     // Wait for result to arrive in inbox (poll for task-result)
-    const taskId = msg.id || msg.payload?.taskId;
+    // Extract taskId from relay ack (assigned by remote agent), fallback to msg fields
+    const taskId = relayAck?.result?.taskId || msg.id || msg.payload?.taskId;
     let result = null;
     const waitStart = Date.now();
     const WAIT_TIMEOUT = 120000; // 2 minutes
@@ -1339,8 +1340,8 @@ async function cmdTask(target, taskJson) {
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const entry = JSON.parse(lines[i]);
-            // Look for result_received from the target
-            if (entry.event === 'result_received' && entry.from === remoteDid) {
+            // Match by taskId first (precise), fallback to from+event (legacy)
+            if (entry.event === 'result_received' && entry.from === remoteDid && (!taskId || entry.taskId === taskId)) {
               result = { taskId: entry.taskId, status: entry.status, result: entry.result, proof: entry.proof, anchor: entry.anchor, execution: entry.execution };
               break;
             }
