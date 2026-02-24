@@ -640,69 +640,8 @@ async function cmdStart(port) {
       return;
     }
 
-    // Agent-to-agent message (no commercial logic)
-    if (event === 'message') {
-      const { from, text, replyTo } = payload;
-      log({ event: 'message_received', from, text: text?.slice(0, 200), replyTo });
-      
-      // Forward to executor if available, otherwise just acknowledge
-      if (EXECUTOR_URL) {
-        (async () => {
-          try {
-            const execResp = await fetch(EXECUTOR_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                taskId: `msg-${Date.now()}`,
-                from: from || 'unknown',
-                action: 'message',
-                payload: { text, replyTo },
-                callbackUrl: `http://127.0.0.1:${p}/atel/v1/result`
-              }),
-              signal: AbortSignal.timeout(600000),
-            });
-            log({ event: 'message_forwarded', status: execResp.status });
-          } catch (e) {
-            log({ event: 'message_forward_error', error: e.message });
-          }
-        })();
-      }
-      res.json({ status: 'received', event: 'message' });
-      return;
-    }
-
     // Unknown event type
     res.json({ status: 'ignored', event });
-  });
-
-  // Agent-to-agent message endpoint (standalone, no commercial logic)
-  endpoint.app?.post?.('/atel/v1/message', async (req, res) => {
-    const { from, text, replyTo } = req.body || {};
-    if (!text) { res.status(400).json({ error: 'text required' }); return; }
-    log({ event: 'message_received', from, text: text?.slice(0, 200), replyTo });
-    
-    if (EXECUTOR_URL) {
-      (async () => {
-        try {
-          const execResp = await fetch(EXECUTOR_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              taskId: `msg-${Date.now()}`,
-              from: from || 'unknown',
-              action: 'message',
-              payload: { text, replyTo },
-              callbackUrl: `http://127.0.0.1:${p}/atel/v1/result`
-            }),
-            signal: AbortSignal.timeout(600000),
-          });
-          log({ event: 'message_forwarded', status: execResp.status });
-        } catch (e) {
-          log({ event: 'message_forward_error', error: e.message });
-        }
-      })();
-    }
-    res.json({ status: 'received', from, text: text?.slice(0, 100) });
   });
 
   // Result callback: POST /atel/v1/result (executor calls this when done)
@@ -1194,68 +1133,6 @@ async function cmdHandshake(remoteEndpoint, remoteDid) {
   let sessions = {}; if (existsSync(sf)) sessions = JSON.parse(readFileSync(sf, 'utf-8'));
   sessions[remoteEndpoint] = { did, sessionId: session.sessionId, encrypted: session.encrypted };
   writeFileSync(sf, JSON.stringify(sessions, null, 2));
-}
-
-// ── msg: Send a free-form message to another agent via relay ──
-async function cmdMsg(targetDid, text) {
-  if (!targetDid || !text) { console.error('Usage: atel msg <did> <message text>'); process.exit(1); }
-  const id = loadIdentity();
-  const RELAY_URL = process.env.ATEL_RELAY || 'http://47.251.8.19:9000';
-  const PLATFORM = process.env.ATEL_PLATFORM || 'http://47.251.8.19:8200';
-
-  // Resolve DID to relay endpoint
-  let relayEndpoint = `${RELAY_URL}/relay/v1/send/${encodeURIComponent(targetDid)}`;
-
-  // Try registry first for relay info
-  try {
-    const resp = await fetch(`${PLATFORM}/registry/v1/search?q=${encodeURIComponent(targetDid)}`, { signal: AbortSignal.timeout(5000) });
-    if (resp.ok) {
-      const data = await resp.json();
-      const agent = data.agents?.find(a => a.did === targetDid);
-      if (agent) {
-        console.log(JSON.stringify({ event: 'target_found', name: agent.name, did: agent.did }));
-      }
-    }
-  } catch {}
-
-  console.log(JSON.stringify({ event: 'sending_message', to: targetDid, via: 'relay', text: text.slice(0, 100) + (text.length > 100 ? '...' : '') }));
-
-  try {
-    const resp = await fetch(relayEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        method: 'POST',
-        path: '/atel/v1/message',
-        body: { from: id.did, text, timestamp: new Date().toISOString() },
-        from: id.did,
-      }),
-      signal: AbortSignal.timeout(60000),
-    });
-
-    if (!resp.ok) {
-      // Fallback to notify with message event
-      const resp2 = await fetch(relayEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          method: 'POST',
-          path: '/atel/v1/notify',
-          body: { event: 'message', payload: { from: id.did, text, timestamp: new Date().toISOString() } },
-          from: id.did,
-        }),
-        signal: AbortSignal.timeout(60000),
-      });
-      const data2 = await resp2.json();
-      console.log(JSON.stringify({ event: 'message_sent', via: 'notify_fallback', response: data2 }));
-    } else {
-      const data = await resp.json();
-      console.log(JSON.stringify({ event: 'message_sent', via: 'message_route', response: data }));
-    }
-  } catch (e) {
-    console.error(JSON.stringify({ event: 'message_failed', error: e.message }));
-    process.exit(1);
-  }
 }
 
 async function cmdTask(target, taskJson) {
@@ -2150,7 +2027,6 @@ const commands = {
   search: () => cmdSearch(args[0]),
   handshake: () => cmdHandshake(args[0], args[1]),
   task: () => cmdTask(args[0], args[1]),
-  msg: () => cmdMsg(args[0], args.slice(1).join(' ')),
   result: () => cmdResult(args[0], args[1]),
   check: () => cmdCheck(args[0], args[1], { chain: rawArgs.includes('--chain') }),
   'verify-proof': () => cmdVerifyProof(args[0], args[1]),
