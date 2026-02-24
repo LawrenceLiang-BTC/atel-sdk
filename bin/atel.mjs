@@ -668,6 +668,32 @@ async function cmdStart(port) {
       return;
     }
 
+    // Order completed notification (requester side)
+    if (event === 'order_completed') {
+      const { orderId, executorDid, capabilityType, priceAmount, description, traceRoot, anchorTx } = payload;
+      log({ event: 'order_completed_notification', orderId, executorDid, capabilityType, priceAmount });
+
+      // Notify owner
+      if (ATEL_NOTIFY_GATEWAY && ATEL_NOTIFY_TARGET) {
+        try {
+          const desc = description ? description.slice(0, 150) : 'N/A';
+          const msg = `📦 Order ${orderId} completed!\nExecutor: ${(executorDid || '').slice(-12)}\nType: ${capabilityType}\nPrice: $${priceAmount || 0}\nTask: ${desc}\nTrace: ${(traceRoot || '').slice(0, 16)}...${anchorTx ? '\n⛓️ On-chain: ' + anchorTx : ''}`;
+          const token = (() => { try { return JSON.parse(readFileSync(join(process.env.HOME || '', '.openclaw/openclaw.json'), 'utf-8')).gateway?.auth?.token || ''; } catch { return ''; } })();
+          if (token) {
+            fetch(`${ATEL_NOTIFY_GATEWAY}/tools/invoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+              body: JSON.stringify({ tool: 'message', args: { action: 'send', message: msg, target: ATEL_NOTIFY_TARGET } }),
+              signal: AbortSignal.timeout(5000),
+            }).then(() => log({ event: 'order_notify_sent', orderId })).catch(e => log({ event: 'order_notify_failed', orderId, error: e.message }));
+          }
+        } catch (e) { log({ event: 'order_notify_error', orderId, error: e.message }); }
+      }
+
+      res.json({ status: 'received', orderId });
+      return;
+    }
+
     // Unknown event type
     res.json({ status: 'ignored', event });
   });
