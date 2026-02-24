@@ -60,6 +60,8 @@ const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
 const IDENTITY_FILE = resolve(ATEL_DIR, 'identity.json');
 const REGISTRY_URL = process.env.ATEL_REGISTRY || 'http://47.251.8.19:8200';
 const ATEL_PLATFORM = process.env.ATEL_PLATFORM || 'http://47.251.8.19:8200';
+const ATEL_NOTIFY_GATEWAY = process.env.ATEL_NOTIFY_GATEWAY || process.env.OPENCLAW_GATEWAY_URL || '';
+const ATEL_NOTIFY_TARGET = process.env.ATEL_NOTIFY_TARGET || '';
 let EXECUTOR_URL = process.env.ATEL_EXECUTOR_URL || '';
 const INBOX_FILE = resolve(ATEL_DIR, 'inbox.jsonl');
 const POLICY_FILE = resolve(ATEL_DIR, 'policy.json');
@@ -824,6 +826,24 @@ async function cmdStart(port) {
     }
 
     log({ event: 'task_completed', taskId, from: task.from, action: task.action, success: success !== false, proof_id: proof.proof_id, trace_root: proof.trace_root, anchor_tx: anchor?.txHash || null, duration_ms: durationMs, timestamp: new Date().toISOString() });
+
+    // ── Notify owner (optional) ──
+    if (ATEL_NOTIFY_GATEWAY && ATEL_NOTIFY_TARGET) {
+      try {
+        const resultText = typeof result === 'object' ? (result.response || JSON.stringify(result)).toString().slice(0, 300) : String(result).slice(0, 300);
+        const status = success !== false ? '✅' : '❌';
+        const msg = `${status} ATEL Task ${taskId}\nFrom: ${task.from.slice(-12)}\nAction: ${task.action}\nDuration: ${(durationMs/1000).toFixed(1)}s\nResult: ${resultText}`;
+        const token = (() => { try { return JSON.parse(readFileSync(join(process.env.HOME || '', '.openclaw/openclaw.json'), 'utf-8')).gateway?.auth?.token || ''; } catch { return ''; } })();
+        if (token) {
+          fetch(`${ATEL_NOTIFY_GATEWAY}/tools/invoke`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ tool: 'message', args: { action: 'send', message: msg, target: ATEL_NOTIFY_TARGET } }),
+            signal: AbortSignal.timeout(5000),
+          }).then(() => log({ event: 'notify_sent', taskId })).catch(e => log({ event: 'notify_failed', taskId, error: e.message }));
+        }
+      } catch (e) { log({ event: 'notify_error', taskId, error: e.message }); }
+    }
 
     // Push result back to sender
     if (task.senderCandidates || task.senderEndpoint) {
