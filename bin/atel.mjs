@@ -946,7 +946,7 @@ async function cmdStart(port) {
     let senderEndpoint = null;
     let senderCandidates = null;
     try {
-      const r = await fetch(`${REGISTRY_URL}/registry/v1/agents/${encodeURIComponent(message.from)}`);
+      const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(message.from)}`);
       if (r.ok) {
         const data = await r.json();
         senderEndpoint = data.endpoint;
