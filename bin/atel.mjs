@@ -2222,6 +2222,69 @@ async function cmdBoostCancel(boostId) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+// ─── Offer Commands ──────────────────────────────────────────────
+
+async function cmdOfferCreate(cap, price) {
+  if (!cap) { console.error('Usage: atel offer <capability> <price> [--title "..."] [--desc "..."]'); process.exit(1); }
+  const titleIdx = rawArgs.indexOf('--title');
+  const descIdx = rawArgs.indexOf('--desc');
+  const title = titleIdx >= 0 ? rawArgs[titleIdx + 1] : undefined;
+  const desc = descIdx >= 0 ? rawArgs[descIdx + 1] : undefined;
+  const body = { capabilityType: cap, priceAmount: parseFloat(price) || 0 };
+  if (title) body.title = title;
+  if (desc) body.description = desc;
+  const data = await signedFetch('POST', '/trade/v1/offer', body);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOfferList(did) {
+  const params = new URLSearchParams();
+  if (did) params.set('did', did);
+  const capIdx = rawArgs.indexOf('--capability');
+  if (capIdx >= 0) params.set('capability', rawArgs[capIdx + 1]);
+  const url = `/trade/v1/offers${params.toString() ? '?' + params : ''}`;
+  const resp = await fetch(`${PLATFORM_URL}${url}`);
+  const data = await resp.json();
+  if (data.offers && data.offers.length > 0) {
+    console.log(`\n  Found ${data.count} offer(s):\n`);
+    for (const o of data.offers) {
+      console.log(`  ${o.offerId}  ${o.executorName || o.executorDid.slice(0,20)+'...'}  ${o.capabilityType}  $${o.priceAmount}  orders:${o.totalOrders}  completed:${o.totalCompleted}  ${o.title || ''}`);
+    }
+    console.log('');
+  } else {
+    console.log('  No active offers found.');
+  }
+}
+
+async function cmdOfferUpdate(offerId) {
+  if (!offerId) { console.error('Usage: atel offer-update <offerId> [--price N] [--title "..."] [--desc "..."] [--status active|paused]'); process.exit(1); }
+  const body = {};
+  const priceIdx = rawArgs.indexOf('--price');
+  const titleIdx = rawArgs.indexOf('--title');
+  const descIdx = rawArgs.indexOf('--desc');
+  const statusIdx = rawArgs.indexOf('--status');
+  if (priceIdx >= 0) body.priceAmount = parseFloat(rawArgs[priceIdx + 1]);
+  if (titleIdx >= 0) body.title = rawArgs[titleIdx + 1];
+  if (descIdx >= 0) body.description = rawArgs[descIdx + 1];
+  if (statusIdx >= 0) body.status = rawArgs[statusIdx + 1];
+  const data = await signedFetch('POST', `/trade/v1/offer/${offerId}/update`, body);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOfferClose(offerId) {
+  if (!offerId) { console.error('Usage: atel offer-close <offerId>'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/offer/${offerId}/close`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOfferBuy(offerId, desc) {
+  if (!offerId) { console.error('Usage: atel offer-buy <offerId> [description]'); process.exit(1); }
+  const body = {};
+  if (desc) body.description = rawArgs.slice(rawArgs.indexOf(offerId) + 1).join(' ');
+  const data = await signedFetch('POST', `/trade/v1/offer/${offerId}/buy`, body);
+  console.log(JSON.stringify(data, null, 2));
+}
+
 // ─── Main ────────────────────────────────────────────────────────
 
 const [,, cmd, ...rawArgs] = process.argv;
@@ -2271,6 +2334,13 @@ const commands = {
   boost: () => cmdBoost(args[0], args[1]),
   'boost-status': () => cmdBoostStatus(args[0]),
   'boost-cancel': () => cmdBoostCancel(args[0]),
+  // Offers
+  offer: () => cmdOfferCreate(args[0], args[1]),
+  offers: () => cmdOfferList(args[0]),
+  'offer-info': () => cmdOfferList(args[0]), // alias — single offer uses GET /offer/:id
+  'offer-update': () => cmdOfferUpdate(args[0]),
+  'offer-close': () => cmdOfferClose(args[0]),
+  'offer-buy': () => cmdOfferBuy(args[0], args[1]),
 };
 
 if (!cmd || !commands[cmd]) {
@@ -2328,6 +2398,13 @@ Boost Commands:
   boost <tier> <weeks>                 Purchase boost (tier: basic|premium|featured)
   boost-status [did]                   Check boost status
   boost-cancel <boostId>               Cancel a boost
+
+Offer Commands (Seller Listings):
+  offer <capability> <price>           Publish a service offer (--title, --desc)
+  offers [did]                         Browse active offers (--capability filter)
+  offer-update <offerId>               Update offer (--price, --title, --desc, --status)
+  offer-close <offerId>                Close an offer
+  offer-buy <offerId> [description]    Buy from an offer (creates order automatically)
 
 Environment:
   ATEL_DIR                Identity directory (default: .atel)
