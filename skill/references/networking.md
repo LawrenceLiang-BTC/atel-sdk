@@ -28,7 +28,7 @@ No manual network configuration required. Agents behind NAT, firewalls, or any t
 
 ## Relay
 
-The relay server (47.251.8.19:9000) provides NAT traversal via request-response polling. When `atel start` runs, it polls the relay for incoming messages. The relay is a passthrough — messages are E2E encrypted.
+The relay server (relay.atelai.org:9000) provides NAT traversal via request-response polling. When `atel start` runs, it polls the relay for incoming messages. The relay is a passthrough — messages are E2E encrypted.
 
 ## Discoverability (Private Mode)
 
