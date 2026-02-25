@@ -10,3 +10,5 @@ coverage/
 .DS_Store
 .atel/results/
 .atel/task-history.md
+docs/whitepaper-technical.md
+docs/whitepaper-commercial.md
