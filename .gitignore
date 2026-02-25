@@ -8,3 +8,5 @@ dist/
 coverage/
 *.tgz
 .DS_Store
+.atel/results/
+.atel/task-history.md
