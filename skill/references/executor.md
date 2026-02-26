@@ -91,7 +91,65 @@ const data = await resp.json();
 const childKey = data.result?.details?.childSessionKey || data.result?.childSessionKey;
 ```
 
-### Poll for result
+### Callback Mode (Recommended)
+
+Instead of polling `sessions_history` (which can be unreliable), use callback mode. The subagent calls back to the executor when done:
+
+```javascript
+// Pending callback registry
+const pendingCallbacks = {};
+
+// Callback endpoint — subagent POSTs result here when done
+app.post('/internal/callback', (req, res) => {
+  const { taskId, response } = req.body;
+  if (pendingCallbacks[taskId]) {
+    pendingCallbacks[taskId]({ response, agent: 'my-agent', action: 'general' });
+    res.json({ status: 'ok' });
+  } else {
+    res.status(404).json({ error: 'No pending callback' });
+  }
+});
+
+async function executeTask(prompt, taskId) {
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => {
+      delete pendingCallbacks[taskId];
+      reject(new Error('Task timed out'));
+    }, 120000);
+
+    pendingCallbacks[taskId] = (result) => {
+      clearTimeout(timeout);
+      delete pendingCallbacks[taskId];
+      resolve(result);
+    };
+
+    // Include callback instruction in prompt
+    const callbackPrompt = `${prompt}
+
+IMPORTANT: When done, deliver your answer by running:
+curl -s -X POST http://127.0.0.1:${PORT}/internal/callback -H "Content-Type: application/json" -d '{"taskId":"${taskId}","response":"YOUR_ANSWER"}'`;
+
+    const resp = await fetch(`${GW_URL}/tools/invoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GW_TOKEN}` },
+      body: JSON.stringify({ tool: 'sessions_spawn', args: { task: callbackPrompt, runTimeoutSeconds: 120 } }),
+    });
+    if (!resp.ok) { clearTimeout(timeout); delete pendingCallbacks[taskId]; reject(new Error('Spawn failed')); }
+
+    const data = await resp.json();
+    console.log('Spawned:', data.result?.details?.childSessionKey);
+  });
+}
+```
+
+Why callback > poll:
+- **Faster**: Result arrives in 5-20s instead of polling for up to 120s
+- **More reliable**: No dependency on `sessions_history` API availability
+- **Simpler**: No polling loop, no retry logic
+
+### Poll Mode (Legacy Fallback)
+
+If callback mode is not possible (e.g., executor has no HTTP server), you can poll `sessions_history`:
 
 ```javascript
 async function waitForResult(sessionKey, timeoutMs = 120000) {
@@ -157,7 +215,7 @@ Good: `Research the following topic: quantum computing`
 
 Protocol stops at the executor boundary. Beyond that, it's just a task.
 
-## Complete OpenClaw Executor Example
+## Complete OpenClaw Executor Example (Callback Mode)
 
 ```javascript
 import express from 'express';
@@ -174,33 +232,39 @@ const GW_TOKEN = (() => {
 
 const app = express();
 app.use(express.json());
+const pendingCallbacks = {};
+
+// Callback endpoint — subagent delivers result here
+app.post('/internal/callback', (req, res) => {
+  const { taskId, response } = req.body;
+  const cb = pendingCallbacks[taskId] || pendingCallbacks[Object.keys(pendingCallbacks).find(k => taskId?.includes(k))];
+  if (cb) { cb({ response, agent: 'my-agent' }); res.json({ status: 'ok' }); }
+  else { res.status(404).json({ error: 'No pending callback' }); }
+});
 
 app.post('/', async (req, res) => {
-  const { taskId, from, action, payload, toolProxy, callbackUrl } = req.body;
+  const { taskId, from, action, payload, callbackUrl } = req.body;
   const callback = callbackUrl || ATEL_CALLBACK;
-
-  // Respond immediately
   res.json({ status: 'accepted', taskId });
 
   try {
-    // Build prompt (no protocol metadata!)
     const text = payload?.text || payload?.query || JSON.stringify(payload);
     const prompt = `Complete this ${action} task:\n${text}`;
 
-    // Spawn OpenClaw session
-    const spawnResp = await fetch(`${GW_URL}/tools/invoke`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GW_TOKEN}` },
-      body: JSON.stringify({ tool: 'sessions_spawn', args: { task: prompt, runTimeoutSeconds: 120 } }),
+    const result = await new Promise(async (resolve, reject) => {
+      const timer = setTimeout(() => { delete pendingCallbacks[taskId]; reject(new Error('Timeout')); }, 120000);
+      pendingCallbacks[taskId] = (r) => { clearTimeout(timer); delete pendingCallbacks[taskId]; resolve(r); };
+
+      const callbackPrompt = `${prompt}\n\nWhen done, run: curl -s -X POST http://127.0.0.1:${PORT}/internal/callback -H "Content-Type: application/json" -d '{"taskId":"${taskId}","response":"YOUR_ANSWER"}'`;
+
+      const resp = await fetch(`${GW_URL}/tools/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GW_TOKEN}` },
+        body: JSON.stringify({ tool: 'sessions_spawn', args: { task: callbackPrompt, runTimeoutSeconds: 120 } }),
+      });
+      if (!resp.ok) { clearTimeout(timer); delete pendingCallbacks[taskId]; reject(new Error('Spawn failed')); }
     });
-    if (!spawnResp.ok) throw new Error(`Spawn failed: ${spawnResp.status}`);
-    const spawnData = await spawnResp.json();
-    const childKey = spawnData.result?.details?.childSessionKey || spawnData.result?.childSessionKey;
 
-    // Poll for result
-    const result = await waitForResult(childKey, 120000);
-
-    // Callback to ATEL
     await fetch(callback, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
