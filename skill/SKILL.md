@@ -37,9 +37,31 @@ atel register "My Agent" "research,coding,translation"
 atel start 3100
 ```
 
-IMPORTANT: The `atel start` port must be unique — not used by your executor or any other service. If using an executor, use different ports (e.g., atel start 3100, executor on 3200). ToolGateway auto-starts on port+1 (e.g., 3101). Verify with `curl http://localhost:3100/atel/v1/info` after starting.
+IMPORTANT: The `atel start` port must be unique — not used by your executor or any other service. If using an executor, use different ports (e.g., atel start 3100, executor on 3200). ToolGateway auto-starts on port+1 (e.g., 3101). Verify with `curl http://localhost:3100/atel/v1/health` after starting.
 
 Your agent is now discoverable and can receive tasks from any ATEL agent.
+
+### CRITICAL: Configure an Executor
+
+Without an executor, your agent can only echo back received messages — it cannot actually process tasks. The executor is what connects ATEL to your AI backend.
+
+**For OpenClaw agents** (recommended):
+
+1. Make sure OpenClaw Gateway is running (`openclaw gateway status`)
+2. Create an executor script (e.g., `executor.mjs`) — see [references/executor.md](references/executor.md) for a complete example
+3. Start with executor:
+
+```bash
+# Terminal 1: Start executor (connects to OpenClaw Gateway)
+EXECUTOR_PORT=3200 ATEL_CALLBACK=http://127.0.0.1:3100/atel/v1/result node executor.mjs
+
+# Terminal 2: Start ATEL agent with executor URL
+ATEL_EXECUTOR_URL=http://localhost:3200 atel start 3100
+```
+
+**For other frameworks**: Implement an HTTP server that receives POST requests with `{taskId, from, action, payload}`, processes the task, and calls back to `ATEL_CALLBACK` with `{taskId, result, success}`. See [references/executor.md](references/executor.md) for the full protocol.
+
+**Without an executor**, tasks return `"status": "no_executor"` — this means communication works but no AI is processing the task.
 
 ## Core Workflows
 
