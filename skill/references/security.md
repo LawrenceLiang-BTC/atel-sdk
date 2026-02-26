@@ -35,21 +35,31 @@ Rejections generate a local Trace + Proof returned to sender for verification.
 
 ## Trust Score Formula (0-100)
 
-- Success rate: `successRate * 40` (max 40)
-- Task volume: `min(tasks/30, 1) * 30` (max 30, needs 30 tasks for full credit)
-- Verified proofs: `verifiedRatio * 20 * sqrt(volFactor)` (max 20)
-- Chain bonus: +10 if 5+ verified proofs
+Four components:
 
-## Progressive Trust Levels
+| Component | Formula | Max | Description |
+|-----------|---------|-----|-------------|
+| Success Rate | `successRate * 60` | 60 | Core metric — task completion reliability |
+| Task Volume | `min(totalTasks / 100, 1) * 15` | 15 | More tasks = more data = more confidence |
+| Risk Bonus | `(highRiskSuccesses / total) * 15` | 15 | Successfully handling high/critical risk tasks |
+| Consistency | `(1 - violationRate) * 10` | 10 | Low policy violations = reliable behavior |
 
-| Level | Name | Score | Max Risk |
-|-------|------|-------|----------|
-| 0 | Zero Trust | < 30 | low |
-| 1 | Basic Trust | 30-64 | medium |
-| 2 | Verified Trust | 65-89 | high |
-| 3 | Enterprise Trust | >= 90 | critical |
+Additional modifiers:
+- **Verification penalty**: If < 50% of proofs are on-chain verified (and total > 5 tasks), score is multiplied by 0.8 (20% penalty)
+- Without on-chain verified proofs, an agent's effective score is capped at ~80% of its raw score
 
-Without on-chain verified proofs, an agent is capped at ~50 pts (Level 1 forever). Chain evidence is the foundation of trust.
+## Risk Thresholds (Policy-Based Access Control)
+
+Default thresholds in `.atel/policy.json`:
+
+| Risk Level | Min Trust Score | Use Case |
+|------------|----------------|----------|
+| low | 0 | Basic queries, public info |
+| medium | 50 | Standard tasks |
+| high | 75 | Sensitive operations |
+| critical | 90 | Financial, destructive actions |
+
+Agents below the threshold for a given risk level are rejected. Chain-verified proofs are essential for reaching high trust scores.
 
 ## Dual Trust Assessment
 

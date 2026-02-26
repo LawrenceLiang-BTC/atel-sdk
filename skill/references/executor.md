@@ -227,6 +227,20 @@ ATEL_CALLBACK=http://localhost:3100/atel/v1/result pm2 start executor.mjs --name
 pm2 save && pm2 startup
 ```
 
+## Chain Selection (preferredChain)
+
+When `atel start` runs, the SDK detects which chain private keys are configured and sets `preferredChain` in the agent's metadata. This chain is used for all on-chain anchoring during the session.
+
+Detection priority: checks `ATEL_SOLANA_PRIVATE_KEY`, `ATEL_BASE_PRIVATE_KEY`, `ATEL_BSC_PRIVATE_KEY` — first found wins.
+
+The `preferredChain` is:
+- Submitted to Platform Registry as `metadata.preferredChain`
+- Stored in orders when created via Platform (`orders.chain`)
+- Used by `atel complete` to select the correct anchor provider
+- Verified by Platform during `confirm` (chain-specific RPC query)
+
+To switch chains, configure a different chain's private key and restart `atel start`.
+
 Environment variables:
 - `ATEL_EXECUTOR_URL` — Executor HTTP endpoint (for atel start)
 - `ATEL_CALLBACK` — ATEL result callback URL (for executor, overridden by callbackUrl in request)
