@@ -71,8 +71,9 @@ const SCORE_FILE = resolve(ATEL_DIR, 'trust-scores.json');
 const GRAPH_FILE = resolve(ATEL_DIR, 'trust-graph.json');
 const NETWORK_FILE = resolve(ATEL_DIR, 'network.json');
 const TRACES_DIR = resolve(ATEL_DIR, 'traces');
+const PENDING_FILE = resolve(ATEL_DIR, 'pending-tasks.json');
 
-const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
+const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], taskMode: 'auto', autoAcceptPlatform: true, autoAcceptP2P: true, trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -93,6 +94,8 @@ function loadNetwork() { if (!existsSync(NETWORK_FILE)) return null; try { retur
 function saveNetwork(n) { ensureDir(); writeFileSync(NETWORK_FILE, JSON.stringify(n, null, 2)); }
 function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACES_DIR, { recursive: true }); writeFileSync(resolve(TRACES_DIR, `${taskId}.jsonl`), trace.export()); }
 function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
+function loadPending() { if (!existsSync(PENDING_FILE)) return {}; try { return JSON.parse(readFileSync(PENDING_FILE, 'utf-8')); } catch { return {}; } }
+function savePending(p) { ensureDir(); writeFileSync(PENDING_FILE, JSON.stringify(p, null, 2)); }
 
 // Derive wallet addresses from env private keys
 async function getWalletAddresses() {
@@ -582,6 +585,56 @@ async function cmdStart(port) {
     res.json({ taskId, events, agent: id.did });
   });
 
+  // Approve pending task: POST /atel/v1/approve (CLI calls this)
+  endpoint.app?.post?.('/atel/v1/approve', async (req, res) => {
+    const { taskId } = req.body || {};
+    if (!taskId) { res.status(400).json({ error: 'taskId required' }); return; }
+    const pending = loadPending();
+    const task = pending[taskId];
+    if (!task) { res.status(404).json({ error: 'Task not found in pending queue' }); return; }
+    if (task.status !== 'pending_confirm') { res.status(400).json({ error: `Task not pending (status: ${task.status})` }); return; }
+
+    if (!EXECUTOR_URL) {
+      res.status(500).json({ error: 'No executor configured' });
+      return;
+    }
+
+    // Forward to executor
+    try {
+      log({ event: 'task_approved', taskId, from: task.from, action: task.action, timestamp: new Date().toISOString() });
+      
+      // Register in active tasks
+      pendingTasks[taskId] = { from: task.from, action: task.action, payload: task.payload, encrypted: task.encrypted || false, acceptedAt: new Date().toISOString() };
+      saveTasks(pendingTasks);
+      enforcer.taskStarted();
+
+      const execResp = await fetch(EXECUTOR_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          taskId,
+          from: task.from,
+          action: task.action,
+          payload: task.payload,
+          encrypted: task.encrypted || false,
+          toolProxy: `http://127.0.0.1:${toolProxyPort}`,
+        }),
+        signal: AbortSignal.timeout(600000),
+      });
+
+      if (execResp.ok) {
+        task.status = 'approved';
+        savePending(pending);
+        res.json({ status: 'approved', taskId, forwarded: true });
+      } else {
+        const err = await execResp.text();
+        res.status(500).json({ error: 'Executor error: ' + err });
+      }
+    } catch (e) {
+      res.status(500).json({ error: 'Forward failed: ' + e.message });
+    }
+  });
+
   // Webhook notification: POST /atel/v1/notify (platform calls this for order events)
   endpoint.app?.post?.('/atel/v1/notify', async (req, res) => {
     const { event, payload } = req.body || {};
@@ -603,9 +656,49 @@ async function cmdStart(port) {
         return;
       }
 
-      // TODO: Add more checks (ContentAuditor, PolicyEngine, etc.)
+      // ── Task Mode Check ──
+      const currentPolicy = loadPolicy();
+      const taskMode = currentPolicy.taskMode || 'auto';
       
-      // Auto-accept for now
+      if (taskMode === 'off') {
+        log({ event: 'order_rejected_mode_off', orderId, requesterDid, capabilityType });
+        // Reject via Platform API
+        try {
+          const timestamp = new Date().toISOString();
+          const rejectPayload = { reason: 'Agent task mode is off' };
+          const signPayload = { did: id.did, timestamp, payload: rejectPayload };
+          const signature = sign(signPayload, id.secretKey);
+          await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ did: id.did, timestamp, signature, payload: rejectPayload }),
+            signal: AbortSignal.timeout(10000),
+          });
+        } catch (e) { log({ event: 'order_reject_api_error', orderId, error: e.message }); }
+        res.json({ status: 'rejected', reason: 'task_mode_off' });
+        return;
+      }
+      
+      if (taskMode === 'confirm' || currentPolicy.autoAcceptPlatform === false) {
+        // Queue for manual approval
+        const pending = loadPending();
+        pending[orderId] = {
+          source: 'platform',
+          from: requesterDid,
+          action: capabilityType,
+          payload: { orderId, priceAmount, description },
+          price: priceAmount || 0,
+          status: 'pending_confirm',
+          receivedAt: new Date().toISOString(),
+          orderId,
+        };
+        savePending(pending);
+        log({ event: 'order_queued', orderId, requesterDid, capabilityType, reason: taskMode === 'confirm' ? 'task_mode_confirm' : 'autoAcceptPlatform_off' });
+        res.json({ status: 'queued', orderId, message: 'Awaiting manual confirmation. Use: atel approve ' + orderId });
+        return;
+      }
+
+      // Auto-accept (default)
       log({ event: 'order_auto_accept', orderId, requesterDid, capabilityType });
       
       // Call platform API to accept
@@ -1066,6 +1159,36 @@ async function cmdStart(port) {
       const rp = generateRejectionProof(message.from, action, reason, 'CAPABILITY_REJECTED');
       log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
       return { status: 'rejected', error: `Action "${action}" outside capability boundary`, capabilities: capTypes, proof: rp };
+    }
+
+    // ── Task Mode Check (P2P) ──
+    const currentPolicy = loadPolicy();
+    const taskMode = currentPolicy.taskMode || 'auto';
+    
+    if (taskMode === 'off') {
+      const reason = 'Agent task mode is off — not accepting tasks';
+      const rp = generateRejectionProof(message.from, action, reason, 'TASK_MODE_OFF');
+      log({ event: 'task_mode_rejected', from: message.from, action, reason: 'task_mode_off', timestamp: new Date().toISOString() });
+      return { status: 'rejected', error: reason, proof: rp };
+    }
+    
+    if (taskMode === 'confirm' || currentPolicy.autoAcceptP2P === false) {
+      const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // Queue for manual approval
+      const pending = loadPending();
+      pending[taskId] = {
+        source: 'p2p',
+        from: message.from,
+        action,
+        payload,
+        price: 0,
+        status: 'pending_confirm',
+        receivedAt: new Date().toISOString(),
+        encrypted: !!session?.encrypted,
+      };
+      savePending(pending);
+      log({ event: 'task_queued', taskId, from: message.from, action, reason: taskMode === 'confirm' ? 'task_mode_confirm' : 'autoAcceptP2P_off', timestamp: new Date().toISOString() });
+      return { status: 'queued', taskId, message: 'Task queued for manual confirmation. Use: atel approve ' + taskId };
     }
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2285,6 +2408,118 @@ async function cmdOfferBuy(offerId, desc) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+// ─── Task Mode Commands ──────────────────────────────────────────
+
+async function cmdMode(newMode) {
+  const policy = loadPolicy();
+  if (!newMode) {
+    console.log(JSON.stringify({
+      taskMode: policy.taskMode || 'auto',
+      autoAcceptPlatform: policy.autoAcceptPlatform !== false,
+      autoAcceptP2P: policy.autoAcceptP2P !== false,
+    }, null, 2));
+    return;
+  }
+  if (!['auto', 'confirm', 'off'].includes(newMode)) {
+    console.error('Usage: atel mode [auto|confirm|off]');
+    console.error('  auto    - Accept and execute all tasks automatically (default)');
+    console.error('  confirm - Queue tasks for manual approval');
+    console.error('  off     - Reject all incoming tasks');
+    process.exit(1);
+  }
+  policy.taskMode = newMode;
+  savePolicy(policy);
+  console.log(JSON.stringify({ status: 'ok', taskMode: newMode, message: `Task mode set to "${newMode}"` }));
+}
+
+async function cmdPending() {
+  const pending = loadPending();
+  const entries = Object.entries(pending);
+  if (entries.length === 0) {
+    console.log('No pending tasks.');
+    return;
+  }
+  console.log(`Pending tasks (${entries.length}):\n`);
+  for (const [taskId, t] of entries) {
+    console.log(`  ${taskId}`);
+    console.log(`    Source:  ${t.source}`);
+    console.log(`    From:    ${t.from}`);
+    console.log(`    Action:  ${t.action}`);
+    console.log(`    Price:   $${t.price || 0}`);
+    console.log(`    Status:  ${t.status}`);
+    console.log(`    Time:    ${t.receivedAt}`);
+    if (t.orderId) console.log(`    OrderId: ${t.orderId}`);
+    console.log('');
+  }
+}
+
+async function cmdApprove(taskId) {
+  if (!taskId) { console.error('Usage: atel approve <taskId|orderId>'); process.exit(1); }
+  const pending = loadPending();
+  const task = pending[taskId];
+  if (!task) { console.error(`Task "${taskId}" not found in pending queue.`); process.exit(1); }
+  if (task.status !== 'pending_confirm') { console.error(`Task "${taskId}" is not pending (status: ${task.status}).`); process.exit(1); }
+
+  if (task.source === 'platform') {
+    // Accept via Platform API
+    const data = await signedFetch('POST', `/trade/v1/order/${task.orderId}/accept`);
+    task.status = 'approved';
+    savePending(pending);
+    console.log(JSON.stringify({ status: 'approved', taskId, orderId: task.orderId, platform: data }));
+  } else {
+    // P2P: notify the running agent to process this task
+    // Try the agent's local approve endpoint first
+    const agentPort = process.env.ATEL_PORT || '3100';
+    try {
+      const resp = await fetch(`http://127.0.0.1:${agentPort}/atel/v1/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        task.status = 'approved';
+        savePending(pending);
+        console.log(JSON.stringify({ status: 'approved', taskId, ...data }));
+      } else {
+        console.error(`Agent error: ${JSON.stringify(data)}`);
+      }
+    } catch (e) {
+      console.error(`Cannot reach agent at port ${agentPort}. Is 'atel start' running?`);
+      console.error(`Error: ${e.message}`);
+      process.exit(1);
+    }
+  }
+}
+
+// Extend reject to handle pending tasks too
+const _origCmdReject = async (orderId) => {
+  if (!orderId) { console.error('Usage: atel reject <orderId|taskId> [reason]'); process.exit(1); }
+  // Check if it's a pending task first
+  const pending = loadPending();
+  if (pending[orderId] && pending[orderId].status === 'pending_confirm') {
+    const task = pending[orderId];
+    const reason = rawArgs.slice(1).join(' ') || 'Manually rejected';
+    if (task.source === 'platform') {
+      const data = await signedFetch('POST', `/trade/v1/order/${task.orderId}/reject`);
+      task.status = 'rejected';
+      task.rejectReason = reason;
+      savePending(pending);
+      console.log(JSON.stringify({ status: 'rejected', taskId: orderId, orderId: task.orderId, reason, platform: data }));
+    } else {
+      task.status = 'rejected';
+      task.rejectReason = reason;
+      savePending(pending);
+      console.log(JSON.stringify({ status: 'rejected', taskId: orderId, reason }));
+    }
+    return;
+  }
+  // Fall through to Platform order reject
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/reject`);
+  console.log(JSON.stringify(data, null, 2));
+};
+
 // ─── Main ────────────────────────────────────────────────────────
 
 const [,, cmd, ...rawArgs] = process.argv;
@@ -2315,7 +2550,7 @@ const commands = {
   order: () => cmdOrder(args[0], args[1], args[2]),
   'order-info': () => cmdOrderInfo(args[0]),
   accept: () => cmdAccept(args[0]),
-  reject: () => cmdReject(args[0]),
+  reject: () => _origCmdReject(args[0]),
   escrow: () => cmdEscrow(args[0]),
   complete: () => cmdComplete(args[0], args[1]),
   confirm: () => cmdConfirm(args[0]),
@@ -2341,6 +2576,10 @@ const commands = {
   'offer-update': () => cmdOfferUpdate(args[0]),
   'offer-close': () => cmdOfferClose(args[0]),
   'offer-buy': () => cmdOfferBuy(args[0], args[1]),
+  // Task Mode
+  mode: () => cmdMode(args[0]),
+  pending: () => cmdPending(),
+  approve: () => cmdApprove(args[0]),
 };
 
 if (!cmd || !commands[cmd]) {
@@ -2406,6 +2645,11 @@ Offer Commands (Seller Listings):
   offer-close <offerId>                Close an offer
   offer-buy <offerId> [description]    Buy from an offer (creates order automatically)
 
+Task Mode Commands:
+  mode [auto|confirm|off]              Get or set task acceptance mode
+  pending                              List tasks awaiting manual confirmation
+  approve <taskId|orderId>             Approve a pending task (forward to executor)
+
 Environment:
   ATEL_DIR                Identity directory (default: .atel)
   ATEL_REGISTRY           Registry URL (default: https://api.atelai.org)
@@ -2417,7 +2661,12 @@ Environment:
   ATEL_BSC_PRIVATE_KEY    BSC chain key for on-chain anchoring
 
 Trust Policy: Configure .atel/policy.json trustPolicy for automatic
-pre-task trust evaluation. Use _risk in payload or --risk flag.`);
+pre-task trust evaluation. Use _risk in payload or --risk flag.
+
+Task Mode: Configure .atel/policy.json taskMode (auto|confirm|off).
+  auto    - Accept all tasks automatically (default)
+  confirm - Queue tasks for manual approval (atel pending / atel approve)
+  off     - Reject all incoming tasks (communication still works)`);
   process.exit(cmd ? 1 : 0);
 }
 
