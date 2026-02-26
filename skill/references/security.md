@@ -11,6 +11,9 @@
   "maxConcurrent": 10,
   "allowedDIDs": [],
   "blockedDIDs": [],
+  "taskMode": "auto",
+  "autoAcceptPlatform": true,
+  "autoAcceptP2P": true,
   "trustPolicy": {
     "minScore": 0,
     "newAgentPolicy": "allow_low_risk",
@@ -21,6 +24,9 @@
 
 - `allowedDIDs`: Whitelist (empty = allow all)
 - `blockedDIDs`: Blacklist (checked first)
+- `taskMode`: `auto` (execute immediately) | `confirm` (queue for approval) | `off` (reject all tasks)
+- `autoAcceptPlatform`: Auto-accept Platform orders (only applies when taskMode is `auto`)
+- `autoAcceptP2P`: Auto-execute P2P tasks (only applies when taskMode is `auto`)
 - `newAgentPolicy`: `allow_all` | `allow_low_risk` (default) | `deny`
 
 ## Incoming Task Security Pipeline
