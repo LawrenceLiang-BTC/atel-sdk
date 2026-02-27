@@ -150,18 +150,22 @@ export class HeartbeatManager {
         nacl.sign.detached(signableBytes, this.identity.secretKey)
       ).toString('base64');
 
-      const resp = await fetch(`${this.registryUrl}/registry/v1/heartbeat`, {
+      const start = Date.now();
+      const url = `${this.registryUrl}/registry/v1/heartbeat`;
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ payload, did: this.identity.did, timestamp, signature }),
         signal: AbortSignal.timeout(15000),
       });
 
-      if (!resp.ok) {
-        console.error(`[Heartbeat] Failed: ${resp.status} ${await resp.text()}`);
+      if (resp.ok) {
+        console.log(`[Heartbeat] OK (${Date.now()-start}ms)`);
+      } else {
+        console.error(`[Heartbeat] Failed: ${resp.status} ${await resp.text()} (${Date.now()-start}ms)`);
       }
     } catch (e) {
-      console.error(`[Heartbeat] Error:`, e.message);
+      console.error(`[Heartbeat] Error: ${e.message} (url: ${this.registryUrl})`);
     }
   }
 }
