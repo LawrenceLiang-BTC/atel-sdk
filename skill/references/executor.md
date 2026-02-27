@@ -70,6 +70,20 @@ const GW_TOKEN = (() => {
 })();
 ```
 
+⚠️ **REQUIRED**: You must whitelist `sessions_spawn` in your OpenClaw gateway config. Add this to `~/.openclaw/openclaw.json` under the `"gateway"` section:
+
+```json
+{
+  "gateway": {
+    "tools": {"allow": ["sessions_spawn"]}
+  }
+}
+```
+
+Then restart: `openclaw gateway restart`
+
+Without this, `/tools/invoke` will return 404 for `sessions_spawn` due to security policy.
+
 ### Spawn a session
 
 ```javascript
