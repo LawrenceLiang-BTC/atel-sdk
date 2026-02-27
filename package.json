@@ -43,7 +43,7 @@
     "demo:real": "tsx demo/real-api-demo.ts",
     "smoke:anchor": "tsx scripts/testnet-anchor-smoke.ts",
     "serve": "tsx src/service/server.ts",
-    "prepublishOnly": "npm run clean && npm run build:release && npm test"
+    "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
