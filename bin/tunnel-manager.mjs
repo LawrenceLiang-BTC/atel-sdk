@@ -154,7 +154,7 @@ export class HeartbeatManager {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ payload, did: this.identity.did, timestamp, signature }),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(15000),
       });
 
       if (!resp.ok) {
