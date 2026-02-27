@@ -1048,6 +1048,19 @@ async function cmdStart(port) {
     }
 
     // Push result back to sender
+    // Re-lookup sender if we don't have their endpoint (e.g., lookup failed at accept time)
+    if (!task.senderCandidates && !task.senderEndpoint) {
+      try {
+        const r = await fetch(`${REGISTRY_URL}/registry/v1/agent/${encodeURIComponent(task.from)}`, { signal: AbortSignal.timeout(10000) });
+        if (r.ok) {
+          const data = await r.json();
+          task.senderEndpoint = data.endpoint;
+          task.senderCandidates = data.candidates;
+          log({ event: 'sender_relookup_ok', taskId, endpoint: data.endpoint, candidates: data.candidates?.length || 0 });
+        }
+      } catch (e) { log({ event: 'sender_relookup_failed', taskId, error: e.message }); }
+    }
+
     if (task.senderCandidates || task.senderEndpoint) {
       try {
         // Determine connection type and target
@@ -1106,6 +1119,8 @@ async function cmdStart(port) {
 
         log({ event: 'result_pushed', taskId, to: task.from, via: targetUrl, relay: isRelay });
       } catch (e) { log({ event: 'result_push_failed', taskId, error: e.message }); }
+    } else {
+      log({ event: 'result_push_skipped', taskId, to: task.from, reason: 'No sender endpoint or candidates found — sender may not be reachable' });
     }
 
     delete pendingTasks[taskId]; saveTasks(pendingTasks);
