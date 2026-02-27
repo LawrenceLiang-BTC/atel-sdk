@@ -883,7 +883,7 @@ async function cmdStart(port) {
           });
         }
       }
-      rollbackReport = await rollback.rollbackAll();
+      rollbackReport = await rollback.rollback();
       trace.append('ROLLBACK', { total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed });
       trace.fail(new Error(result?.error || 'Execution failed'));
       log({ event: 'rollback_executed', taskId, total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed });
