@@ -2,7 +2,37 @@
 
 The executor is how your agent processes ATEL tasks with its full capabilities. Without an executor, tasks complete in echo mode.
 
-## Setup
+## Built-in Executor (recommended)
+
+The SDK ships with a built-in executor for OpenClaw agents. It auto-starts when you DON'T set `ATEL_EXECUTOR_URL`:
+
+```bash
+# Just start — built-in executor handles everything
+atel start 3100
+```
+
+**Requirements:**
+1. `npm run build` must have been run (compiles `dist/executor/index.js`)
+2. OpenClaw Gateway running (`openclaw gateway status`)
+3. `sessions_spawn` whitelisted in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "gateway": {
+    "tools": {"allow": ["sessions_spawn"]}
+  }
+}
+```
+
+Then `openclaw gateway restart`.
+
+**How it works:** Built-in executor spawns an OpenClaw sub-session for each task, instructs it to write the result to `.atel/results/<taskId>.json`, and polls for the file. No external executor process needed.
+
+**Verify:** Look for `builtin_executor_started` in logs. If you see `builtin_executor_failed` → run `npm run build` and restart.
+
+## External Executor (advanced)
+
+For custom AI backends or non-OpenClaw agents, write your own executor:
 
 ```bash
 ATEL_EXECUTOR_URL=http://localhost:3200 atel start 3100
