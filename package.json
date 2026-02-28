@@ -1,6 +1,6 @@
 {
   "name": "@lawrenceliang-btc/atel-sdk",
-  "version": "0.8.9",
+  "version": "0.8.10",
   "description": "ATEL Protocol SDK - Agent Trust & Exchange Layer",
   "repository": {
     "type": "git",
