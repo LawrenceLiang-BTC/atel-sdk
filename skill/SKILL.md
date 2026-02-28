@@ -103,6 +103,57 @@ npm install -g .     # Re-install globally to update the `atel` CLI
 
 Skipping `npm run build` is the #1 cause of "built-in executor failed" errors.
 
+## Troubleshooting (Field Notes — 2026-02-28)
+
+These are real production pitfalls we hit during cross-agent testing.
+
+1. **`Unexpected end of JSON input` when running `atel task`**
+   - Root cause: `.atel/sessions.json` exists but is **empty file** (0 bytes).
+   - Fix: ensure valid JSON object:
+
+```bash
+[ -s .atel/sessions.json ] || echo '{}' > .atel/sessions.json
+```
+
+2. **DID mismatch after identity reset (`No pending handshake with did:...`)**
+   - Symptom: Registry shows new DID, but `/atel/v1/health` still returns old DID.
+   - Root cause: old `atel start 3100` process still running and occupying port 3100.
+   - Fix:
+
+```bash
+lsof -i :3100
+# kill old atel processes, then restart one clean instance
+atel start 3100
+curl -s http://127.0.0.1:3100/atel/v1/health
+```
+
+3. **P2P task rejected: `Action "general" outside capability boundary`**
+   - Cause: target agent capabilities do not include `general` (e.g., only `assistant,research,openclaw`).
+   - Fix: either send matching action (`assistant`/`research`) or re-register with needed capability.
+
+4. **Context recall returns old token instead of newest value**
+   - Cause: free-form history matching can pick stale entries.
+   - Fix in SDK: use structured `MEMKEY|timestamp|key|value` history and always read the latest entry.
+   - Temporary workaround: clear task history before memory-sensitive tests:
+
+```bash
+echo "" > .atel/task-history.md
+```
+
+5. **`sessions_spawn` unavailable via `/tools/invoke`**
+   - Cause: gateway tool allowlist missing.
+   - Fix in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "gateway": {
+    "tools": {"allow": ["sessions_spawn"]}
+  }
+}
+```
+
+Then restart gateway: `openclaw gateway restart`.
+
 ## Core Workflows
 
 ATEL supports two communication modes. Choose based on your needs:

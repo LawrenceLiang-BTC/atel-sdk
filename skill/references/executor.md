@@ -231,6 +231,16 @@ async function waitForResult(sessionKey, timeoutMs = 120000) {
 - **401 Unauthorized**: Missing or wrong token. Read from `~/.openclaw/openclaw.json` -> `gateway.auth.token`.
 - **Gateway not running**: Run `openclaw gateway status` to check, `openclaw gateway start` to start.
 - **Port mismatch**: Default gateway port is 18789. Check with `openclaw gateway status`.
+- **`sessions_spawn` not available / 404**: gateway allowlist missing. Add `{"gateway":{"tools":{"allow":["sessions_spawn"]}}}` and restart gateway.
+- **`Unexpected end of JSON input` in `atel task`**: `.atel/sessions.json` is empty. Ensure valid JSON:
+  - `mkdir -p .atel && [ -s .atel/sessions.json ] || echo '{}' > .atel/sessions.json`
+- **Old DID still appears after reset**: stale `atel start` process still occupies 3100.
+  - `lsof -i :3100` -> kill old processes -> restart one clean agent instance.
+- **Context recall returns stale token**: history not reset or old entries dominate.
+  - Clear before tests: `echo "" > .atel/task-history.md`
+  - SDK now uses structured memory entries (`MEMKEY|ts|key|value`) with newest-wins logic.
+- **Action rejected outside capability boundary**: target does not advertise the action (e.g., no `general`).
+  - Use matching action (`assistant`/`research`) or update target capabilities and re-register.
 
 ## ToolGateway
 
