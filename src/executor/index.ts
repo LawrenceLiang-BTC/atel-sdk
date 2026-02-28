@@ -137,12 +137,21 @@ export class BuiltinExecutor {
         ? ((result as Record<string, unknown>).response || JSON.stringify(result)).toString().slice(0, 200)
         : String(result).slice(0, 200);
 
-      const entry = `### ${timestamp} | ${action} | from: ${from.slice(-8)}
+      let entry = `### ${timestamp} | ${action} | from: ${from.slice(-8)}
 - Task: ${text.slice(0, 150)}
 - Result: ${success ? resultText : 'FAILED'}
 - Status: ${success ? 'success' : 'failed'}
-
 `;
+
+      // Structured memory keys (newest wins): MEMKEY|<ts>|<key>|<value>
+      // Example: MEMKEY|2026-02-28T13:20:00.000Z|TOKEN_Z|RED_WOLF_888
+      const assignMatches = [...text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*=\s*([A-Z0-9_\-]{3,})\b/g)];
+      if (assignMatches.length > 0) {
+        const m = assignMatches[assignMatches.length - 1];
+        entry += `\nMEMKEY|${timestamp}|${m[1]}|${m[2]}\n`;
+      }
+
+      entry += '\n';
       appendFileSync(this.taskHistoryPath, entry);
       this.log({ event: 'history_saved', taskId });
     } catch (e: unknown) {
@@ -260,23 +269,20 @@ export class BuiltinExecutor {
   private extractLatestMemoryHints(history: string): string {
     if (!history) return '';
 
-    const hints: string[] = [];
+    // Strict parse: only trust structured MEMKEY entries
+    // Format: MEMKEY|<timestamp>|<key>|<value>
+    const lines = history.split('\n').map(l => l.trim()).filter(Boolean);
+    const memLines = lines.filter(l => l.startsWith('MEMKEY|'));
+    if (memLines.length === 0) return '';
 
-    // Find latest explicit token/codeword assignment (e.g., TOKEN_X = ABC123)
-    const assignMatches = [...history.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*=\s*([A-Z0-9_\-]{3,})\b/g)];
-    if (assignMatches.length > 0) {
-      const m = assignMatches[assignMatches.length - 1];
-      hints.push(`Latest assignment: ${m[1]} = ${m[2]}`);
-    }
+    const latest = memLines[memLines.length - 1];
+    const parts = latest.split('|');
+    if (parts.length < 4) return '';
 
-    // Find latest codeword mention (e.g., codeword ... BLUE_PANDA_729)
-    const codewordMatches = [...history.matchAll(/codeword[^\n]{0,80}?([A-Z0-9_\-]{4,})/gi)];
-    if (codewordMatches.length > 0) {
-      const m = codewordMatches[codewordMatches.length - 1];
-      hints.push(`Latest codeword: ${m[1]}`);
-    }
-
-    return hints.join('\n');
+    const ts = parts[1];
+    const key = parts[2];
+    const value = parts.slice(3).join('|');
+    return `Latest memory entry: ${key} = ${value} (at ${ts})`;
   }
 
   private buildPrompt(from: string, action: string, payload: Record<string, unknown>): string {
@@ -307,7 +313,7 @@ export class BuiltinExecutor {
     }
 
     prompt += `## Task\n${guide}\n\n${text}\n\n`;
-    prompt += `## Recall Rule\nIf the task asks about previous-round memory (token/codeword/value), prefer the newest matching entry from Recent Task History / Latest Memory Hints. If older and newer values conflict, always return the newest value.`;
+    prompt += `## Recall Rule\nIf memory values conflict, ONLY use the latest MEMKEY entry. Never use older values when a newer MEMKEY exists.`;
 
     return prompt;
   }

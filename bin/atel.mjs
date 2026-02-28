@@ -1454,6 +1454,18 @@ async function cmdSearch(capability) {
   console.log(JSON.stringify(result, null, 2));
 }
 
+function safeReadJsonObject(path, fallback = {}) {
+  try {
+    if (!existsSync(path)) return fallback;
+    const raw = readFileSync(path, 'utf-8').trim();
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function cmdHandshake(remoteEndpoint, remoteDid) {
   const id = requireIdentity();
   const client = new AgentClient(id);
@@ -1464,7 +1476,7 @@ async function cmdHandshake(remoteEndpoint, remoteDid) {
   const session = await client.handshake(remoteEndpoint, hsManager, did, wallets);
   console.log(JSON.stringify({ status: 'handshake_complete', sessionId: session.sessionId, remoteDid: did, encrypted: session.encrypted, remoteWalletsVerified: session.remoteWalletsVerified, remoteWallets: session.remoteWallets }, null, 2));
   const sf = resolve(ATEL_DIR, 'sessions.json');
-  let sessions = {}; if (existsSync(sf)) sessions = JSON.parse(readFileSync(sf, 'utf-8'));
+  let sessions = safeReadJsonObject(sf, {});
   sessions[remoteEndpoint] = { did, sessionId: session.sessionId, encrypted: session.encrypted };
   writeFileSync(sf, JSON.stringify(sessions, null, 2));
 }
@@ -1639,7 +1651,7 @@ async function cmdTask(target, taskJson) {
       }
     }
     await client.handshake(remoteEndpoint, hsManager, remoteDid);
-    let sessions = {}; if (existsSync(sf)) sessions = JSON.parse(readFileSync(sf, 'utf-8'));
+    let sessions = safeReadJsonObject(sf, {});
     sessions[remoteEndpoint] = { did: remoteDid };
     writeFileSync(sf, JSON.stringify(sessions, null, 2));
 
