@@ -129,6 +129,35 @@ export class BuiltinExecutor {
     } catch { return ''; }
   }
 
+  private extractMemoryKey(text: string): { key: string; value: string } | null {
+    if (!text) return null;
+
+    // Pattern 1: explicit assignment, e.g. TOKEN_A=RED_WOLF_888
+    const assignMatches = [...text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*=\s*([A-Z0-9_\-]{3,})\b/g)];
+    if (assignMatches.length > 0) {
+      const m = assignMatches[assignMatches.length - 1];
+      return { key: m[1], value: m[2] };
+    }
+
+    // Pattern 2: token/password style in prompt, e.g. 口令 TOKEN_Xxx / token TOKEN_Xxx
+    const tokenMatches = [...text.matchAll(/(?:口令|token|口令是|token is)\s*[:：]?\s*([A-Z0-9_\-]{4,})/gi)];
+    if (tokenMatches.length > 0) {
+      const m = tokenMatches[tokenMatches.length - 1];
+      return { key: 'LATEST_TOKEN', value: m[1] };
+    }
+
+    // Pattern 3: bare TOKEN_XXX appearance when asking to memorize
+    if (/(记住|memorize|remember)/i.test(text)) {
+      const bare = [...text.matchAll(/\b(TOKEN_[A-Z0-9_\-]{2,})\b/g)];
+      if (bare.length > 0) {
+        const m = bare[bare.length - 1];
+        return { key: 'LATEST_TOKEN', value: m[1] };
+      }
+    }
+
+    return null;
+  }
+
   private saveTaskHistory(taskId: string, from: string, action: string, payload: Record<string, unknown>, result: unknown, success: boolean): void {
     try {
       const timestamp = new Date().toISOString();
@@ -144,16 +173,14 @@ export class BuiltinExecutor {
 `;
 
       // Structured memory keys (newest wins): MEMKEY|<ts>|<key>|<value>
-      // Example: MEMKEY|2026-02-28T13:20:00.000Z|TOKEN_Z|RED_WOLF_888
-      const assignMatches = [...text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*=\s*([A-Z0-9_\-]{3,})\b/g)];
-      if (assignMatches.length > 0) {
-        const m = assignMatches[assignMatches.length - 1];
-        entry += `\nMEMKEY|${timestamp}|${m[1]}|${m[2]}\n`;
+      const memory = this.extractMemoryKey(text);
+      if (memory) {
+        entry += `\nMEMKEY|${timestamp}|${memory.key}|${memory.value}\n`;
       }
 
       entry += '\n';
       appendFileSync(this.taskHistoryPath, entry);
-      this.log({ event: 'history_saved', taskId });
+      this.log({ event: 'history_saved', taskId, memkey: memory?.key || null });
     } catch (e: unknown) {
       this.log({ event: 'history_save_failed', taskId, error: (e as Error).message });
     }

@@ -236,9 +236,10 @@ async function waitForResult(sessionKey, timeoutMs = 120000) {
   - `mkdir -p .atel && [ -s .atel/sessions.json ] || echo '{}' > .atel/sessions.json`
 - **Old DID still appears after reset**: stale `atel start` process still occupies 3100.
   - `lsof -i :3100` -> kill old processes -> restart one clean agent instance.
-- **Context recall returns stale token**: history not reset or old entries dominate.
+- **Context recall returns stale token**: history not reset or memory key not extracted from prompt.
   - Clear before tests: `echo "" > .atel/task-history.md`
-  - SDK now uses structured memory entries (`MEMKEY|ts|key|value`) with newest-wins logic.
+  - SDK uses structured memory entries (`MEMKEY|ts|key|value`) with newest-wins logic.
+  - Since v0.8.9, executor also extracts token memory from natural prompts like `口令 TOKEN_X...` / `token TOKEN_X...`, not only `KEY=VALUE` syntax.
 - **Action rejected outside capability boundary**: target does not advertise the action (e.g., no `general`).
   - Use matching action (`assistant`/`research`) or update target capabilities and re-register.
 
