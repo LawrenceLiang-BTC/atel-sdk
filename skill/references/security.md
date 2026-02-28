@@ -50,9 +50,15 @@ Four components:
 | Risk Bonus | `(highRiskSuccesses / total) * 15` | 15 | Successfully handling high/critical risk tasks |
 | Consistency | `(1 - violationRate) * 10` | 10 | Low policy violations = reliable behavior |
 
-Additional modifiers:
-- **Verification penalty**: If < 50% of proofs are on-chain verified (and total > 5 tasks), score is multiplied by 0.8 (20% penalty)
-- Without on-chain verified proofs, an agent's effective score is capped at ~80% of its raw score
+Additional modifiers (v2):
+- **Early verification penalty**: If total tasks >= 3 and < 50% of proofs are on-chain verified, apply penalty
+  - total 3-9: score × 0.85
+  - total >= 10: score × 0.70
+- **Cold-start caps** (new DID stabilization):
+  - total < 5  -> score capped at 55
+  - total < 10 -> score capped at 65
+  - total < 20 -> score capped at 75
+- This prevents very new agents from jumping to high trust too quickly without enough verified history.
 
 ## Risk Thresholds (Policy-Based Access Control)
 

@@ -11,7 +11,12 @@
  *   volume      = min(total_tasks / 100, 1) × 15
  *   risk_bonus  = (high_risk_success / total) × 15
  *   consistency = (1 − violation_rate) × 10
- *   final       = base + volume + risk_bonus + consistency
+ *   raw         = base + volume + risk_bonus + consistency
+ *
+ * v2 adjustments:
+ *   - early verification penalty starts at total>=3 when verified ratio < 50%
+ *   - stronger penalty at total>=10 when verified ratio < 50%
+ *   - cold-start caps: <5 => max 55, <10 => max 65, <20 => max 75
  */
 
 import type { AnchorProvider, AnchorRecord } from '../anchor/index.js';
@@ -279,6 +284,27 @@ export class TrustScoreClient {
     };
   }
 
+  // ─── Score Computation Helpers ────────────────────────────────
+
+  private applyV2Adjustments(rawScore: number, total: number, verifiedCount: number): number {
+    let score = rawScore;
+
+    // Verification penalty (v2): start earlier and increase with volume
+    if (total >= 3) {
+      const verifiedRatio = total > 0 ? verifiedCount / total : 0;
+      if (verifiedRatio < 0.5) {
+        score *= total >= 10 ? 0.7 : 0.85;
+      }
+    }
+
+    // Cold-start cap (v2)
+    if (total < 5) score = Math.min(score, 55);
+    else if (total < 10) score = Math.min(score, 65);
+    else if (total < 20) score = Math.min(score, 75);
+
+    return score;
+  }
+
   // ─── Score Computation from On-Chain Proofs ──────────────────
 
   private computeScoreFromProofs(agentId: string, records: OnChainProofRecord[]): ScoreReport {
@@ -306,14 +332,8 @@ export class TrustScoreClient {
     const violationRate = totalViolations / total;
     const consistency = (1 - Math.min(violationRate, 1)) * 10;
 
-    let score = base + volume + riskBonus + consistency;
-
-    // Verification bonus: verified proofs are more trustworthy
-    // If less than 50% of records are verified, apply a penalty
-    if (verifiedCount < total * 0.5 && total > 5) {
-      score *= 0.8; // 20% penalty for mostly unverified records
-    }
-
+    const rawScore = base + volume + riskBonus + consistency;
+    let score = this.applyV2Adjustments(rawScore, total, verifiedCount);
     score = Math.round(Math.min(100, Math.max(0, score)) * 100) / 100;
 
     // Risk flags
@@ -360,7 +380,8 @@ export class TrustScoreClient {
     const totalViolations = summaries.reduce((sum, s) => sum + s.policy_violations, 0);
     const violationRate = totalViolations / total;
     const consistency = (1 - Math.min(violationRate, 1)) * 10;
-    const score = Math.round(Math.min(100, Math.max(0, base + volume + riskBonus + consistency)) * 100) / 100;
+    const rawScore = base + volume + riskBonus + consistency;
+    const score = Math.round(Math.min(100, Math.max(0, this.applyV2Adjustments(rawScore, total, 0))) * 100) / 100;
 
     const flags: string[] = [];
     if (successRate < 0.5) flags.push(FLAG_LOW_SUCCESS_RATE);
