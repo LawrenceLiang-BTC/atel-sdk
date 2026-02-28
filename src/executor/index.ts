@@ -257,6 +257,28 @@ export class BuiltinExecutor {
     }
   }
 
+  private extractLatestMemoryHints(history: string): string {
+    if (!history) return '';
+
+    const hints: string[] = [];
+
+    // Find latest explicit token/codeword assignment (e.g., TOKEN_X = ABC123)
+    const assignMatches = [...history.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*=\s*([A-Z0-9_\-]{3,})\b/g)];
+    if (assignMatches.length > 0) {
+      const m = assignMatches[assignMatches.length - 1];
+      hints.push(`Latest assignment: ${m[1]} = ${m[2]}`);
+    }
+
+    // Find latest codeword mention (e.g., codeword ... BLUE_PANDA_729)
+    const codewordMatches = [...history.matchAll(/codeword[^\n]{0,80}?([A-Z0-9_\-]{4,})/gi)];
+    if (codewordMatches.length > 0) {
+      const m = codewordMatches[codewordMatches.length - 1];
+      hints.push(`Latest codeword: ${m[1]}`);
+    }
+
+    return hints.join('\n');
+  }
+
   private buildPrompt(from: string, action: string, payload: Record<string, unknown>): string {
     const text = (payload.text || payload.message || payload.task || payload.query || JSON.stringify(payload)) as string;
 
@@ -265,6 +287,7 @@ export class BuiltinExecutor {
       coding: 'Help with the following coding task. Provide working code with brief explanation.',
       research: 'Research the following topic and provide useful, accurate information.',
       general: 'Complete the following task.',
+      assistant: 'Complete the following task accurately and concisely.',
     };
 
     const guide = guides[action] || guides.general;
@@ -273,11 +296,18 @@ export class BuiltinExecutor {
     if (this.agentContext) {
       prompt += `## Agent Context\n${this.agentContext}\n\n`;
     }
+
     const history = this.loadTaskHistory();
     if (history) {
       prompt += `## Recent Task History\n${history}\n\n`;
+      const hints = this.extractLatestMemoryHints(history);
+      if (hints) {
+        prompt += `## Latest Memory Hints (most recent wins)\n${hints}\n\n`;
+      }
     }
-    prompt += `## Task\n${guide}\n\n${text}`;
+
+    prompt += `## Task\n${guide}\n\n${text}\n\n`;
+    prompt += `## Recall Rule\nIf the task asks about previous-round memory (token/codeword/value), prefer the newest matching entry from Recent Task History / Latest Memory Hints. If older and newer values conflict, always return the newest value.`;
 
     return prompt;
   }
