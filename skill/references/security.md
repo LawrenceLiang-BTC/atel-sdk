@@ -24,6 +24,7 @@
 
 - `allowedDIDs`: Whitelist (empty = allow all)
 - `blockedDIDs`: Blacklist (checked first)
+- Since v0.8.10, DID allow/block policy reloads per incoming request (no agent restart required after policy.json edits).
 - `taskMode`: `auto` (execute immediately) | `confirm` (queue for approval) | `off` (reject all tasks)
 - `autoAcceptPlatform`: Auto-accept Platform orders (only applies when taskMode is `auto`)
 - `autoAcceptP2P`: Auto-execute P2P tasks (only applies when taskMode is `auto`)

@@ -1165,6 +1165,10 @@ async function cmdStart(port) {
     }
 
     // ── Policy check ──
+    // Reload policy on each request so DID allow/block updates take effect immediately.
+    const currentPolicy = loadPolicy();
+    enforcer.policy = currentPolicy;
+
     const pc = enforcer.check(message);
     if (!pc.allowed) {
       const rp = generateRejectionProof(message.from, action, pc.reason, 'POLICY_VIOLATION');
@@ -1181,7 +1185,6 @@ async function cmdStart(port) {
     }
 
     // ── Task Mode Check (P2P) ──
-    const currentPolicy = loadPolicy();
     const taskMode = currentPolicy.taskMode || 'auto';
     
     if (taskMode === 'off') {
