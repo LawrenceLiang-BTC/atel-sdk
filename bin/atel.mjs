@@ -72,6 +72,7 @@ const GRAPH_FILE = resolve(ATEL_DIR, 'trust-graph.json');
 const NETWORK_FILE = resolve(ATEL_DIR, 'network.json');
 const TRACES_DIR = resolve(ATEL_DIR, 'traces');
 const PENDING_FILE = resolve(ATEL_DIR, 'pending-tasks.json');
+const RESULT_PUSH_QUEUE_FILE = resolve(ATEL_DIR, 'pending-result-pushes.json');
 
 const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], taskMode: 'auto', autoAcceptPlatform: true, autoAcceptP2P: true, trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
 
@@ -96,6 +97,8 @@ function saveTrace(taskId, trace) { if (!existsSync(TRACES_DIR)) mkdirSync(TRACE
 function loadTrace(taskId) { const f = resolve(TRACES_DIR, `${taskId}.jsonl`); if (!existsSync(f)) return null; return readFileSync(f, 'utf-8'); }
 function loadPending() { if (!existsSync(PENDING_FILE)) return {}; try { return JSON.parse(readFileSync(PENDING_FILE, 'utf-8')); } catch { return {}; } }
 function savePending(p) { ensureDir(); writeFileSync(PENDING_FILE, JSON.stringify(p, null, 2)); }
+function loadResultPushQueue() { if (!existsSync(RESULT_PUSH_QUEUE_FILE)) return []; try { const q = JSON.parse(readFileSync(RESULT_PUSH_QUEUE_FILE, 'utf-8')); return Array.isArray(q) ? q : []; } catch { return []; } }
+function saveResultPushQueue(items) { ensureDir(); writeFileSync(RESULT_PUSH_QUEUE_FILE, JSON.stringify(items, null, 2)); }
 
 // Derive wallet addresses from env private keys
 async function getWalletAddresses() {
@@ -474,6 +477,79 @@ async function cmdStart(port) {
   const policy = loadPolicy();
   const enforcer = new PolicyEnforcer(policy);
   const pendingTasks = loadTasks();
+  let resultPushQueue = loadResultPushQueue();
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  async function pushResultOnce(task, taskId, resultPayload) {
+    // Determine connection type and target
+    let targetUrl = task.senderEndpoint;
+    let isRelay = false;
+
+    if (task.senderCandidates && task.senderCandidates.length > 0) {
+      const conn = await connectToAgent(task.senderCandidates, task.from);
+      if (conn) {
+        targetUrl = conn.url;
+        isRelay = conn.candidateType === 'relay';
+      }
+    }
+    if (!targetUrl) throw new Error('No reachable endpoint');
+
+    if (isRelay) {
+      const relaySend = async (path, body) => {
+        const resp = await fetch(targetUrl, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ method: 'POST', path, body, from: id.did }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) throw new Error(`Relay ${path} failed: ${resp.status}`);
+        return resp.json();
+      };
+
+      const hsManager = new HandshakeManager(id);
+      const initMsg = hsManager.createInit(task.from);
+      const ackMsg = await relaySend('/atel/v1/handshake', initMsg);
+      const { confirm } = hsManager.processAck(ackMsg);
+      await relaySend('/atel/v1/handshake', confirm);
+
+      const msg = createMessage({ type: 'task-result', from: id.did, to: task.from, payload: resultPayload, secretKey: id.secretKey });
+      await relaySend('/atel/v1/task', msg);
+    } else {
+      const client = new AgentClient(id);
+      const hsManager = new HandshakeManager(id);
+      await client.handshake(targetUrl, hsManager, task.from);
+      const msg = createMessage({ type: 'task-result', from: id.did, to: task.from, payload: resultPayload, secretKey: id.secretKey });
+      await client.sendTask(targetUrl, msg, hsManager);
+    }
+
+    return { targetUrl, isRelay };
+  }
+
+  async function pushResultWithRetry(task, taskId, resultPayload, opts = {}) {
+    const maxAttempts = opts.maxAttempts || 4;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const r = await pushResultOnce(task, taskId, resultPayload);
+        return { ok: true, ...r, attempts: attempt };
+      } catch (e) {
+        lastErr = e;
+        log({ event: 'result_push_retry', taskId, attempt, maxAttempts, error: e.message });
+        if (attempt < maxAttempts) await sleep(1000 * Math.pow(2, attempt - 1));
+      }
+    }
+    return { ok: false, error: lastErr?.message || 'unknown_error', attempts: maxAttempts };
+  }
+
+  function enqueueResultPush(item) {
+    const idx = resultPushQueue.findIndex(x => x.taskId === item.taskId);
+    if (idx >= 0) {
+      resultPushQueue[idx] = { ...resultPushQueue[idx], ...item };
+    } else {
+      resultPushQueue.push(item);
+    }
+    saveResultPushQueue(resultPushQueue);
+  }
 
   // ── Network: collect candidates ──
   let networkConfig = loadNetwork();
@@ -1065,63 +1141,43 @@ async function cmdStart(port) {
     }
 
     if (task.senderCandidates || task.senderEndpoint) {
+      const resultPayload = {
+        taskId,
+        status: success !== false ? 'completed' : 'failed',
+        result,
+        proof: { proof_id: proof.proof_id, trace_root: proof.trace_root, events_count: trace.events.length },
+        anchor: anchor ? { chain: 'solana', txHash: anchor.txHash, block: anchor.blockNumber } : null,
+        execution: { duration_ms: durationMs, encrypted: task.encrypted },
+        rollback: rollbackReport ? { total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed } : null,
+      };
       try {
-        // Determine connection type and target
-        let targetUrl = task.senderEndpoint;
-        let isRelay = false;
-
-        if (task.senderCandidates && task.senderCandidates.length > 0) {
-          const conn = await connectToAgent(task.senderCandidates, task.from);
-          if (conn) {
-            targetUrl = conn.url;
-            isRelay = conn.candidateType === 'relay';
-          }
-        }
-        if (!targetUrl) throw new Error('No reachable endpoint');
-
-        const resultPayload = {
-          taskId,
-          status: success !== false ? 'completed' : 'failed',
-          result,
-          proof: { proof_id: proof.proof_id, trace_root: proof.trace_root, events_count: trace.events.length },
-          anchor: anchor ? { chain: 'solana', txHash: anchor.txHash, block: anchor.blockNumber } : null,
-          execution: { duration_ms: durationMs, encrypted: task.encrypted },
-          rollback: rollbackReport ? { total: rollbackReport.total, succeeded: rollbackReport.succeeded, failed: rollbackReport.failed } : null,
-        };
-
-        if (isRelay) {
-          // Relay mode: use relay send API
-          const relaySend = async (path, body) => {
-            const resp = await fetch(targetUrl, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ method: 'POST', path, body, from: id.did }),
-              signal: AbortSignal.timeout(60000),
-            });
-            if (!resp.ok) throw new Error(`Relay ${path} failed: ${resp.status}`);
-            return resp.json();
-          };
-
-          // Handshake via relay
-          const hsManager = new HandshakeManager(id);
-          const initMsg = hsManager.createInit(task.from);
-          const ackMsg = await relaySend('/atel/v1/handshake', initMsg);
-          const { confirm } = hsManager.processAck(ackMsg);
-          await relaySend('/atel/v1/handshake', confirm);
-
-          // Send result via relay
-          const msg = createMessage({ type: 'task-result', from: id.did, to: task.from, payload: resultPayload, secretKey: id.secretKey });
-          await relaySend('/atel/v1/task', msg);
+        const push = await pushResultWithRetry(task, taskId, resultPayload, { maxAttempts: 4 });
+        if (push.ok) {
+          log({ event: 'result_pushed', taskId, to: task.from, via: push.targetUrl, relay: push.isRelay, attempts: push.attempts });
         } else {
-          // Direct mode
-          const client = new AgentClient(id);
-          const hsManager = new HandshakeManager(id);
-          await client.handshake(targetUrl, hsManager, task.from);
-          const msg = createMessage({ type: 'task-result', from: id.did, to: task.from, payload: resultPayload, secretKey: id.secretKey });
-          await client.sendTask(targetUrl, msg, hsManager);
+          enqueueResultPush({
+            taskId,
+            task,
+            resultPayload,
+            retryCount: 4,
+            nextRetryAt: Date.now() + 15000,
+            lastError: push.error,
+            createdAt: Date.now(),
+          });
+          log({ event: 'result_push_failed_queued', taskId, error: push.error, queue_size: resultPushQueue.length });
         }
-
-        log({ event: 'result_pushed', taskId, to: task.from, via: targetUrl, relay: isRelay });
-      } catch (e) { log({ event: 'result_push_failed', taskId, error: e.message }); }
+      } catch (e) {
+        enqueueResultPush({
+          taskId,
+          task,
+          resultPayload,
+          retryCount: 1,
+          nextRetryAt: Date.now() + 15000,
+          lastError: e.message,
+          createdAt: Date.now(),
+        });
+        log({ event: 'result_push_failed_queued', taskId, error: e.message, queue_size: resultPushQueue.length });
+      }
     } else {
       log({ event: 'result_push_skipped', taskId, to: task.from, reason: 'No sender endpoint or candidates found — sender may not be reachable' });
     }
@@ -1291,6 +1347,47 @@ async function cmdStart(port) {
   endpoint.onProof(async (message) => { log({ event: 'proof_received', from: message.from, payload: message.payload, timestamp: new Date().toISOString() }); });
 
   await endpoint.start();
+
+  // Background retry for failed result pushes (durable queue)
+  const flushResultPushQueue = async () => {
+    if (!resultPushQueue.length) return;
+    const now = Date.now();
+    const remaining = [];
+    for (const item of resultPushQueue) {
+      if (item.nextRetryAt && now < item.nextRetryAt) {
+        remaining.push(item);
+        continue;
+      }
+      try {
+        const push = await pushResultWithRetry(item.task, item.taskId, item.resultPayload, { maxAttempts: 2 });
+        if (push.ok) {
+          log({ event: 'result_push_recovered', taskId: item.taskId, to: item.task?.from, via: push.targetUrl, relay: push.isRelay, attempts: (item.retryCount || 0) + push.attempts });
+        } else {
+          const retryCount = (item.retryCount || 0) + 2;
+          if (retryCount >= 10) {
+            log({ event: 'result_push_give_up', taskId: item.taskId, to: item.task?.from, error: push.error, retryCount });
+          } else {
+            remaining.push({ ...item, retryCount, lastError: push.error, nextRetryAt: Date.now() + Math.min(60000, 5000 * Math.pow(2, Math.min(retryCount, 6))) });
+          }
+        }
+      } catch (e) {
+        const retryCount = (item.retryCount || 0) + 1;
+        if (retryCount >= 10) {
+          log({ event: 'result_push_give_up', taskId: item.taskId, to: item.task?.from, error: e.message, retryCount });
+        } else {
+          remaining.push({ ...item, retryCount, lastError: e.message, nextRetryAt: Date.now() + Math.min(60000, 5000 * Math.pow(2, Math.min(retryCount, 6))) });
+        }
+      }
+    }
+    resultPushQueue = remaining;
+    saveResultPushQueue(resultPushQueue);
+  };
+
+  // Run immediately once, then periodically
+  flushResultPushQueue().catch((e) => log({ event: 'result_push_flush_error', error: e.message }));
+  setInterval(() => {
+    flushResultPushQueue().catch((e) => log({ event: 'result_push_flush_error', error: e.message }));
+  }, 15000);
 
   // Auto-register to Registry with candidates
   if (capTypes.length > 0 && networkConfig.candidates.length > 0) {
