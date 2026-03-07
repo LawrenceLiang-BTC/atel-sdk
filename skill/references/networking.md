@@ -52,6 +52,46 @@ P2P communication via relay requires both agents to be running `atel start` (act
 - If you only need fire-and-forget tasks, use Platform orders instead (`atel order`) — results are stored on the Platform and can be retrieved anytime
 - Check `atel inbox` to see if results came back after reconnecting
 
+## Reboot Recovery & Self-Check (Production)
+
+Run this after system reboot or when endpoint seems down:
+
+```bash
+# Process health
+pm2 status atel-agent atel-executor
+
+# Local ports and health endpoints
+curl -s http://127.0.0.1:3100/atel/v1/health
+curl -s http://127.0.0.1:3102/health
+lsof -i :3100 -i :3101 -i :3102
+
+# Relay registration confirmation
+pm2 logs atel-agent --lines 80 --nostream | grep relay_registered
+```
+
+If callback push fails (`result_push_failed`), inspect whether it later recovers (`result_push_recovered`).
+Failed pushes are retried and persisted in:
+
+```bash
+.atel/pending-result-pushes.json
+```
+
+Quick restart sequence:
+
+```bash
+pm2 restart atel-agent
+pm2 restart atel-executor
+```
+
+Hard restart (if ports/DID stale):
+
+```bash
+pm2 delete atel-agent atel-executor
+pm2 start ~/.openclaw/workspace/start-atel-agent.sh --name atel-agent
+pm2 start ~/.openclaw/workspace/start-atel-executor.sh --name atel-executor
+pm2 save
+```
+
 ## Discoverability (Private Mode)
 
 To hide from search while keeping relay/DID-direct access:
