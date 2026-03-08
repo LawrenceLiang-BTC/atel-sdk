@@ -2803,7 +2803,7 @@ Protocol Commands:
 
 Account Commands:
   balance                              Show platform account balance
-  deposit <amount> [channel]           Deposit funds (channel: manual|crypto_sol|stripe|alipay)
+  deposit <amount> [channel]           Deposit funds (channel: manual|crypto_solana|crypto_base|crypto_bsc|stripe|alipay)
   withdraw <amount> [channel] [address] Withdraw funds (address required for crypto)
   transactions                         List payment history
 
