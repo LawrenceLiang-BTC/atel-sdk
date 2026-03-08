@@ -1104,8 +1104,9 @@ async function cmdStart(port) {
             proofBundle: proof,
             traceRoot: proof.trace_root,
             anchorTx: anchor?.txHash || null,
-            chain: anchor?.chain || null,
+            chain: anchor?.chain || task?.chain || 'solana',
             traceEvents: trace.events, // Include trace events for verification
+            audit: auditSummary,
           };
           const signPayload = { did: id.did, timestamp, payload };
           const signature = sign(signPayload, id.secretKey);
@@ -2349,6 +2350,7 @@ async function cmdComplete(orderId, taskId) {
   let proof = null;
   let anchor = null;
   let trace = null;
+  let traceEvents = [];
   const traceData = loadTrace(effectiveTaskId);
   if (traceData) {
     try {
@@ -2357,6 +2359,7 @@ async function cmdComplete(orderId, taskId) {
       if (proofLine) proof = proofLine;
       const anchorLine = lines.find(l => l.anchor_tx);
       if (anchorLine) anchor = { txHash: anchorLine.anchor_tx, trace_root: anchorLine.trace_root };
+      traceEvents = lines.filter(l => l && typeof l === 'object' && typeof l.type === 'string' && typeof l.hash === 'string');
     } catch {}
   }
 
@@ -2439,10 +2442,39 @@ async function cmdComplete(orderId, taskId) {
     } catch (e) { console.error(`[complete] Registry score push failed: ${e.message}`); }
   } catch (e) { console.error(`[complete] Trust score error: ${e.message}`); }
 
-  // Attach proof + anchor to payload
+  const effectiveTraceEvents = trace?.events || traceEvents || [];
+  const traceAudit = trace?.verify ? trace.verify() : {
+    valid: effectiveTraceEvents.length > 0,
+    errors: effectiveTraceEvents.length > 0 ? [] : ['trace_events_missing'],
+  };
+  const orderPrice = Number(orderInfo?.priceAmount ?? 0);
+  const isPaidOrder = orderId.startsWith('ord-') && orderPrice > 0;
+  const anchorTx = anchor?.txHash || null;
+  const anchorChain = anchorTx ? (anchor?.chain || orderInfo?.chain || 'solana') : (orderInfo?.chain || null);
+  const auditReasons = [];
+  if (!traceAudit.valid) auditReasons.push('trace_hash_chain_invalid');
+  if (isPaidOrder && !anchorTx) auditReasons.push('paid_order_anchor_missing');
+  const auditPassed = auditReasons.length === 0;
+  const auditSummary = {
+    passed: auditPassed,
+    trace_hash_chain_valid: traceAudit.valid,
+    trace_errors: traceAudit.errors,
+    events_count: effectiveTraceEvents.length,
+    trace_root: proof.trace_root,
+    order_price: orderPrice,
+    anchor_required: isPaidOrder,
+    anchor_tx: anchorTx,
+    anchor_chain: anchorChain,
+    reasons: auditReasons,
+  };
+
+  // Attach proof + anchor + audit to payload
   payload.proofBundle = proof;
   payload.traceRoot = proof.trace_root;
-  if (anchor?.txHash) payload.anchorTx = anchor.txHash;
+  payload.traceEvents = effectiveTraceEvents;
+  payload.audit = auditSummary;
+  if (anchorTx) payload.anchorTx = anchorTx;
+  if (anchorChain) payload.chain = anchorChain;
 
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/complete`, payload);
   console.log(JSON.stringify(data, null, 2));
