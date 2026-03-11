@@ -28,3 +28,6 @@ export * from './collaboration/index.js';
 export * from './network/index.js';
 export * from './auditor/index.js';
 export * from './executor/index.js';
+
+// ── Audit Module ─────────────────────────────────────────────
+export * from './audit/index.js';

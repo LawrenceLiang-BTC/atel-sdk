@@ -24,7 +24,8 @@ export type TraceEventType =
   | 'CHECKPOINT'
   | 'TASK_RESULT'
   | 'TASK_FAILED'
-  | 'ROLLBACK';
+  | 'ROLLBACK'
+  | 'THINKING_CHAIN';
 
 /** A single event in the execution trace */
 export interface TraceEvent {
