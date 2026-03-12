@@ -13,3 +13,21 @@ coverage/
 docs/whitepaper-technical.md
 docs/whitepaper-commercial.md
 .atel/model-config.json
+
+# ATEL runtime data
+.atel/
+
+# Test artifacts
+test-*.mjs
+test-*.js
+*TEST*.json
+*RESULTS*.json
+start-test.sh
+
+# Internal reports
+/*REPORT*.md
+/*SUMMARY*.md
+/*DEPLOYMENT*.md
+/*COMPLIANCE*.md
+/*DELIVERY*.md
+/*STATUS*.md
