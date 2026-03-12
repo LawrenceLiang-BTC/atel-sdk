@@ -922,7 +922,8 @@ async function cmdStart(port) {
   }
 
   async function pushResultWithRetry(task, taskId, resultPayload, opts = {}) {
-    const maxAttempts = opts.maxAttempts || 4;
+    const maxAttempts = opts.maxAttempts || 3; // Reduced from 4 to 3
+    const retryDelays = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -931,9 +932,14 @@ async function cmdStart(port) {
       } catch (e) {
         lastErr = e;
         log({ event: 'result_push_retry', taskId, attempt, maxAttempts, error: e.message });
-        if (attempt < maxAttempts) await sleep(1000 * Math.pow(2, attempt - 1));
+        if (attempt < maxAttempts) {
+          const delay = retryDelays[attempt - 1] || 4000;
+          await sleep(delay);
+        }
       }
     }
+    // After max retries, give up and log
+    log({ event: 'result_push_failed', taskId, to: task.from, error: lastErr?.message || 'unknown_error', attempts: maxAttempts });
     return { ok: false, error: lastErr?.message || 'unknown_error', attempts: maxAttempts };
   }
 
@@ -1802,7 +1808,7 @@ async function cmdStart(port) {
           log({ event: 'result_push_recovered', taskId: item.taskId, to: item.task?.from, via: push.targetUrl, relay: push.isRelay, attempts: (item.retryCount || 0) + push.attempts });
         } else {
           const retryCount = (item.retryCount || 0) + 2;
-          if (retryCount >= 10) {
+          if (retryCount >= 6) { // Reduced from 10 to 6
             log({ event: 'result_push_give_up', taskId: item.taskId, to: item.task?.from, error: push.error, retryCount });
           } else {
             remaining.push({ ...item, retryCount, lastError: push.error, nextRetryAt: Date.now() + Math.min(60000, 5000 * Math.pow(2, Math.min(retryCount, 6))) });
@@ -1810,7 +1816,7 @@ async function cmdStart(port) {
         }
       } catch (e) {
         const retryCount = (item.retryCount || 0) + 1;
-        if (retryCount >= 10) {
+        if (retryCount >= 6) { // Reduced from 10 to 6
           log({ event: 'result_push_give_up', taskId: item.taskId, to: item.task?.from, error: e.message, retryCount });
         } else {
           remaining.push({ ...item, retryCount, lastError: e.message, nextRetryAt: Date.now() + Math.min(60000, 5000 * Math.pow(2, Math.min(retryCount, 6))) });
@@ -2097,6 +2103,11 @@ async function cmdTask(target, taskJson) {
 
   // Parse task payload and extract risk level
   const payload = typeof taskJson === 'string' ? JSON.parse(taskJson) : taskJson;
+  if (!payload || typeof payload !== 'object') {
+    console.error('Error: Task payload is required and must be a valid JSON object');
+    console.error('Usage: atel task <DID> \'{"action":"general","payload":{"prompt":"..."}}\'');
+    process.exit(1);
+  }
   const risk = payload._risk || 'low';
   delete payload._risk;
   const force = payload._force || false;
