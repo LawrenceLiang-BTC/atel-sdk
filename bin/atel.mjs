@@ -851,28 +851,38 @@ async function cmdStart(port) {
 
   async function verifyAnchorFromChain(chain, txHash, traceRoot) {
     try {
+      console.error('[DEBUG] verifyAnchorFromChain input:', { chain, txHash, traceRoot });
+      
       if (!txHash || !traceRoot) return { checked: false, verified: false, reason: 'missing_anchor_or_root' };
       const c = (chain || 'solana').toLowerCase();
+      
       if (c === 'solana') {
         const rpcUrl = process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+        console.error('[DEBUG] Solana RPC URL:', rpcUrl);
         const provider = new SolanaAnchorProvider({ rpcUrl });
         const r = await provider.verify(traceRoot, txHash);
-        return { checked: true, verified: !!r?.valid, chain: 'solana' };
+        console.error('[DEBUG] Solana verify result:', r);
+        return { checked: true, verified: !!r?.valid, chain: 'solana', detail: r?.detail };
       }
       if (c === 'base') {
         const rpcUrl = process.env.ATEL_BASE_RPC_URL || 'https://mainnet.base.org';
+        console.error('[DEBUG] Base RPC URL:', rpcUrl);
         const provider = new BaseAnchorProvider({ rpcUrl });
         const r = await provider.verify(traceRoot, txHash);
-        return { checked: true, verified: !!r?.valid, chain: 'base' };
+        console.error('[DEBUG] Base verify result:', r);
+        return { checked: true, verified: !!r?.valid, chain: 'base', detail: r?.detail };
       }
       if (c === 'bsc') {
         const rpcUrl = process.env.ATEL_BSC_RPC_URL || 'https://bsc-dataseed.binance.org';
+        console.error('[DEBUG] BSC RPC URL:', rpcUrl);
         const provider = new BSCAnchorProvider({ rpcUrl });
         const r = await provider.verify(traceRoot, txHash);
-        return { checked: true, verified: !!r?.valid, chain: 'bsc' };
+        console.error('[DEBUG] BSC verify result:', r);
+        return { checked: true, verified: !!r?.valid, chain: 'bsc', detail: r?.detail };
       }
       return { checked: false, verified: false, reason: `unsupported_chain:${c}` };
     } catch (e) {
+      console.error('[DEBUG] verifyAnchorFromChain error:', e);
       return { checked: true, verified: false, reason: e.message };
     }
   }
