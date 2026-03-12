@@ -1,0 +1,85 @@
+{
+  "interactions": [
+    {
+      "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+      "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "scene": "greeting",
+      "success": true,
+      "task_weight": 0.010175500000000002,
+      "duration_ms": 117
+    },
+    {
+      "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+      "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "scene": "send",
+      "success": true,
+      "task_weight": 0.010024000000000002,
+      "duration_ms": 16
+    },
+    {
+      "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+      "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "scene": "general",
+      "success": true,
+      "task_weight": 0.034385500000000006,
+      "duration_ms": 16257
+    }
+  ],
+  "exported": {
+    "nodes": [
+      {
+        "agent_id": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+        "registered_at": "2026-03-11T15:22:00.550Z",
+        "total_interactions": 3,
+        "scenes": {}
+      },
+      {
+        "agent_id": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+        "registered_at": "2026-03-11T15:22:00.550Z",
+        "total_interactions": 3,
+        "scenes": {}
+      }
+    ],
+    "edges": [
+      {
+        "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+        "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+        "scene": "greeting",
+        "total_tasks": 1,
+        "successful_tasks": 1,
+        "failed_tasks": 0,
+        "total_weight": 0.010175500000000002,
+        "successful_weight": 0.010175500000000002,
+        "avg_duration_ms": 117,
+        "last_interaction": "2026-03-11T15:22:00.550Z",
+        "consistency_score": 1
+      },
+      {
+        "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+        "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+        "scene": "send",
+        "total_tasks": 1,
+        "successful_tasks": 1,
+        "failed_tasks": 0,
+        "total_weight": 0.010024000000000002,
+        "successful_weight": 0.010024000000000002,
+        "avg_duration_ms": 16,
+        "last_interaction": "2026-03-11T15:22:00.550Z",
+        "consistency_score": 1
+      },
+      {
+        "from": "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw",
+        "to": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+        "scene": "general",
+        "total_tasks": 1,
+        "successful_tasks": 1,
+        "failed_tasks": 0,
+        "total_weight": 0.034385500000000006,
+        "successful_weight": 0.034385500000000006,
+        "avg_duration_ms": 16257,
+        "last_interaction": "2026-03-11T15:24:50.593Z",
+        "consistency_score": 1
+      }
+    ]
+  }
+}

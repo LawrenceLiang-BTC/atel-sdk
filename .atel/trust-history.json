@@ -1,0 +1,52 @@
+{
+  "did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw": {
+    "tasks": 6,
+    "successes": 6,
+    "failures": 0,
+    "lastSeen": "2026-03-11T15:40:47.944Z",
+    "proofs": [
+      {
+        "proof_id": "47cfdd16-598a-47ba-adcc-09e6c445905e",
+        "trace_root": "026bbde47a785f4c11cc00a795103c727442652ea77e96816e2662a83fbcc100",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:16:00.923Z"
+      },
+      {
+        "proof_id": "af51c2c7-207f-4646-af34-924a69021dfe",
+        "trace_root": "34e48e9db60ebd72d2d0f56236c1aaf804aff5a22689f6692d9d6217592cc0a0",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:16:36.225Z"
+      },
+      {
+        "proof_id": "8d3ee4e5-bcdf-4b8b-9ec1-d5f671dcc85f",
+        "trace_root": "36a5a2e556c2f0f5e3a0e15d4be3c969b7c22f591e5d1aca008f9d3bd6e11185",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:23:06.270Z"
+      },
+      {
+        "proof_id": "994605e4-d3e1-4d7d-b1c3-6ef2c74be30c",
+        "trace_root": "aec267fdcc82669981fee274739ae5acf0bfa51561166c551da16869a6fa131f",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:27:08.179Z"
+      },
+      {
+        "proof_id": "49faa8b7-770a-4a43-890c-d6015594d7d9",
+        "trace_root": "d2a56a628ba387e103e81fa81f1762d3d312cf79dc9234c477ce30219b772364",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:32:06.593Z"
+      },
+      {
+        "proof_id": "e96522c6-6c5c-44da-bac9-b4729285a6ac",
+        "trace_root": "9064e297c2d805968c95e837d199f084d6ffb18aeabf9e54dfe0286fe4f57781",
+        "verified": false,
+        "anchor_tx": null,
+        "timestamp": "2026-03-11T15:40:47.943Z"
+      }
+    ]
+  }
+}

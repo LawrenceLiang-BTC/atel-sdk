@@ -1,0 +1,110 @@
+{"event":"network_setup","status":"auto-detecting"}
+{"event":"network_step","message":"Local candidate: http://10.3.0.7:3100"}
+{"event":"network_step","message":"Discovering public IP..."}
+{"event":"network_step","message":"Public IP: 43.160.210.220"}
+{"event":"network_step","message":"Attempting UPnP port mapping..."}
+{"event":"network_step","message":"UPnP failed: timeout"}
+{"event":"network_step","message":"Direct candidate (unverified): http://43.160.210.220:3100"}
+{"event":"network_step","message":"Relay fallback: http://47.251.8.19:9000"}
+{"event":"network_step","message":"Total candidates: 3"}
+{"event":"tool_gateway_started","port":3101}
+{"event":"context_loaded","path":"/root/.openclaw/workspace/atel-sdk/.atel/agent-context.md","size":399}
+{"event":"started","port":3102,"gateway":"http://127.0.0.1:18789","callback":"http://127.0.0.1:3100/atel/v1/result","hasToken":true,"hasContext":true}
+{"event":"builtin_executor_started","port":3102,"url":"http://127.0.0.1:3102"}
+{"event":"relay_registered","relay":"http://47.251.8.19:9000"}
+{"event":"network_loaded","candidates":3}
+{"event":"tool_gateway_started","port":3101}
+{"event":"context_loaded","path":"/root/.openclaw/workspace/atel-sdk/.atel/agent-context.md","size":399}
+{"event":"started","port":3102,"gateway":"http://127.0.0.1:18789","callback":"http://127.0.0.1:3100/atel/v1/result","hasToken":true,"hasContext":true}
+{"event":"builtin_executor_started","port":3102,"url":"http://127.0.0.1:3102"}
+{"event":"auto_registered","registry":"https://api.atelai.org","candidates":3,"discoverable":true,"wallets":[],"preferredChain":null}
+{"event":"relay_registered","relay":"http://47.251.8.19:9000"}
+{"event":"task_accepted","taskId":"task-1773239732411-nj6ydj","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"greeting","encrypted":true,"timestamp":"2026-03-11T14:35:32.769Z"}
+{"event":"task_received","taskId":"task-1773239732411-nj6ydj","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"greeting","toolProxy":"http://127.0.0.1:3101"}
+{"event":"toolgateway_init","taskId":"task-1773239732411-nj6ydj"}
+{"event":"toolgateway_registered","taskId":"task-1773239732411-nj6ydj","tool":"openclaw_agent"}
+{"event":"history_loaded","entries":10,"using":10}
+{"event":"executing","taskId":"task-1773239732411-nj6ydj","promptLength":3065}
+{"event":"task_completed","taskId":"task-1773239732411-nj6ydj"}
+{"event":"history_saved","taskId":"task-1773239732411-nj6ydj","memkey":null}
+{"event":"trace_finalized","taskId":"task-1773239732411-nj6ydj","events":3}
+{"event":"trace_imported","taskId":"task-1773239732411-nj6ydj","event_count":3,"has_tool_calls":true}
+{"event":"trust_score_updated_no_anchor","reason":"No on-chain anchor — recorded as unverified. Set ATEL_SOLANA_PRIVATE_KEY for verified proofs."}
+{"event":"trust_score_updated","did":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","score":55,"total_tasks":1,"success_rate":1,"verified_count":0}
+{"event":"trust_graph_updated","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","to":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","scene":"greeting","nodes":2,"edges":1,"interactions":1}
+{"event":"anchor_missing","taskId":"task-1773239732411-nj6ydj","warning":"Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.","timestamp":"2026-03-11T14:35:33.262Z"}
+{"event":"task_audit_summary","taskId":"task-1773239732411-nj6ydj","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"greeting","audit":{"passed":true,"trace_hash_chain_valid":true,"trace_errors":[],"events_count":4,"trace_root":"ab645130fc42ccf9a0bf3276968e328c6a97d7c6d75b97dde1a3cf8c5b729cea","order_price":0,"anchor_required":false,"anchor_tx":null,"anchor_verify":{"checked":false,"verified":false,"chain":null,"reason":null},"reasons":[]},"timestamp":"2026-03-11T14:35:33.262Z"}
+{"event":"task_completed","taskId":"task-1773239732411-nj6ydj","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"greeting","success":true,"audit_passed":true,"proof_id":"6b154c73-1d25-4c2c-9f31-b14b09f34f97","trace_root":"ab645130fc42ccf9a0bf3276968e328c6a97d7c6d75b97dde1a3cf8c5b729cea","anchor_tx":null,"duration_ms":117,"timestamp":"2026-03-11T14:35:33.262Z"}
+{"event":"result_push_starting","taskId":"task-1773239732411-nj6ydj","hasSenderEndpoint":true,"hasSenderCandidates":true}
+{"event":"result_pushed","taskId":"task-1773239732411-nj6ydj","to":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","via":"http://47.251.8.19:9000/relay/v1/send/did%3Aatel%3Aed25519%3AAWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","relay":true,"attempts":1}
+{"event":"callback_sent","taskId":"task-1773239732411-nj6ydj","success":true}
+{"event":"task_accepted","taskId":"task-1773241906053-wbizaw","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"send","encrypted":true,"timestamp":"2026-03-11T15:11:46.976Z"}
+{"event":"task_received","taskId":"task-1773241906053-wbizaw","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"send","toolProxy":"http://127.0.0.1:3101"}
+{"event":"toolgateway_init","taskId":"task-1773241906053-wbizaw"}
+{"event":"toolgateway_registered","taskId":"task-1773241906053-wbizaw","tool":"openclaw_agent"}
+{"event":"history_loaded","entries":11,"using":10}
+{"event":"executing","taskId":"task-1773241906053-wbizaw","promptLength":3080}
+{"event":"task_completed","taskId":"task-1773241906053-wbizaw"}
+{"event":"history_saved","taskId":"task-1773241906053-wbizaw","memkey":null}
+{"event":"trace_finalized","taskId":"task-1773241906053-wbizaw","events":3}
+{"event":"trace_imported","taskId":"task-1773241906053-wbizaw","event_count":3,"has_tool_calls":true}
+{"event":"trust_score_updated_no_anchor","reason":"No on-chain anchor — recorded as unverified. Set ATEL_SOLANA_PRIVATE_KEY for verified proofs."}
+{"event":"trust_score_updated","did":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","score":55,"total_tasks":2,"success_rate":1,"verified_count":0}
+{"event":"trust_graph_updated","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","to":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","scene":"send","nodes":2,"edges":2,"interactions":2}
+{"event":"anchor_missing","taskId":"task-1773241906053-wbizaw","warning":"Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.","timestamp":"2026-03-11T15:11:47.385Z"}
+{"event":"task_audit_summary","taskId":"task-1773241906053-wbizaw","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"send","audit":{"passed":true,"trace_hash_chain_valid":true,"trace_errors":[],"events_count":4,"trace_root":"b1a0984bc81f194827ce0bb195d9715002917c470248111119c9624d6e8ef71b","order_price":0,"anchor_required":false,"anchor_tx":null,"anchor_verify":{"checked":false,"verified":false,"chain":null,"reason":null},"reasons":[]},"timestamp":"2026-03-11T15:11:47.385Z"}
+{"event":"task_completed","taskId":"task-1773241906053-wbizaw","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"send","success":true,"audit_passed":true,"proof_id":"2473a3fb-260e-4972-8a81-41a3fb1105ea","trace_root":"b1a0984bc81f194827ce0bb195d9715002917c470248111119c9624d6e8ef71b","anchor_tx":null,"duration_ms":16,"timestamp":"2026-03-11T15:11:47.385Z"}
+{"event":"result_push_starting","taskId":"task-1773241906053-wbizaw","hasSenderEndpoint":true,"hasSenderCandidates":true}
+{"event":"result_pushed","taskId":"task-1773241906053-wbizaw","to":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","via":"http://47.251.8.19:9000/relay/v1/send/did%3Aatel%3Aed25519%3AAWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","relay":true,"attempts":1}
+{"event":"callback_sent","taskId":"task-1773241906053-wbizaw","success":true}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773242148332-9az6by","status":"completed","proof":{"proof_id":"47cfdd16-598a-47ba-adcc-09e6c445905e","trace_root":"026bbde47a785f4c11cc00a795103c727442652ea77e96816e2662a83fbcc100","events_count":4},"anchor":null,"execution":{"duration_ms":116,"encrypted":true},"result":{"error":"Tool openclaw_agent failed: 500"},"timestamp":"2026-03-11T15:15:58.153Z"}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773242186345-ta40id","status":"completed","proof":{"proof_id":"af51c2c7-207f-4646-af34-924a69021dfe","trace_root":"34e48e9db60ebd72d2d0f56236c1aaf804aff5a22689f6692d9d6217592cc0a0","events_count":4},"anchor":null,"execution":{"duration_ms":15,"encrypted":true},"result":{"error":"Tool openclaw_agent failed: 500"},"timestamp":"2026-03-11T15:16:36.166Z"}
+{"event":"stopped"}
+{"event":"stopped"}
+{"event":"unhandled_rejection","reason":"Error [ERR_SERVER_NOT_RUNNING]: Server is not running.","promise":"[object Promise]"}
+{"event":"stopped"}
+{"event":"network_loaded","candidates":3}
+{"event":"tool_gateway_started","port":3101}
+{"event":"context_loaded","path":"/root/.openclaw/workspace/atel-sdk/.atel/agent-context.md","size":399}
+{"event":"started","port":3102,"gateway":"http://127.0.0.1:18789","callback":"http://127.0.0.1:3100/atel/v1/result","hasToken":true,"hasContext":true}
+{"event":"builtin_executor_started","port":3102,"url":"http://127.0.0.1:3102"}
+{"event":"trust_scores_loaded","records":0,"summaries":2}
+{"event":"trust_graph_loaded","interactions":2,"stats":{"total_nodes":2,"total_edges":2,"total_interactions":2,"scenes":["greeting","send"],"avg_trust":1}}
+{"event":"auto_registered","registry":"https://api.atelai.org","candidates":3,"discoverable":true,"wallets":[],"preferredChain":null}
+{"event":"relay_registered","relay":"http://47.251.8.19:9000"}
+{"event":"network_loaded","candidates":3}
+{"event":"tool_gateway_started","port":3101}
+{"event":"context_loaded","path":"/root/.openclaw/workspace/atel-sdk/.atel/agent-context.md","size":399}
+{"event":"started","port":3102,"gateway":"http://127.0.0.1:18789","callback":"http://127.0.0.1:3100/atel/v1/result","hasToken":true,"hasContext":true}
+{"event":"builtin_executor_started","port":3102,"url":"http://127.0.0.1:3102"}
+{"event":"trust_scores_loaded","records":0,"summaries":2}
+{"event":"trust_graph_loaded","interactions":2,"stats":{"total_nodes":2,"total_edges":2,"total_interactions":2,"scenes":["greeting","send"],"avg_trust":1}}
+{"event":"auto_registered","registry":"https://api.atelai.org","candidates":3,"discoverable":true,"wallets":[],"preferredChain":null}
+{"event":"relay_registered","relay":"http://47.251.8.19:9000"}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773242570491-k95107","status":"completed","proof":{"proof_id":"8d3ee4e5-bcdf-4b8b-9ec1-d5f671dcc85f","trace_root":"36a5a2e556c2f0f5e3a0e15d4be3c969b7c22f591e5d1aca008f9d3bd6e11185","events_count":4},"anchor":null,"execution":{"duration_ms":15,"encrypted":true},"result":{"error":"Tool openclaw_agent failed: 500"},"timestamp":"2026-03-11T15:23:03.391Z"}
+{"event":"rejection_proof","rejectId":"reject-1773242637405-1kbkr3","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"unknown","stage":"CAPABILITY_REJECTED","reason":"Outside capability: [general,coding,research]","proof_id":"e44c2341-864e-47f7-aae8-ce8f8ee175de","trace_root":"55a98e072b9425f915ece1a0ec9aa218da77487f83ceb594fe243912b05c48be","timestamp":"2026-03-11T15:23:57.409Z"}
+{"event":"task_rejected","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"unknown","reason":"Outside capability: [general,coding,research]","timestamp":"2026-03-11T15:23:57.409Z"}
+{"event":"task_accepted","taskId":"task-1773242673414-7n5p79","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"general","encrypted":true,"timestamp":"2026-03-11T15:24:33.821Z"}
+{"event":"task_received","taskId":"task-1773242673414-7n5p79","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"general","toolProxy":"http://127.0.0.1:3101"}
+{"event":"toolgateway_init","taskId":"task-1773242673414-7n5p79"}
+{"event":"toolgateway_registered","taskId":"task-1773242673414-7n5p79","tool":"openclaw_agent"}
+{"event":"history_loaded","entries":12,"using":10}
+{"event":"executing","taskId":"task-1773242673414-7n5p79","promptLength":3142}
+{"event":"session_spawned","taskId":"internal-1773242673836","childKey":"agent:main:subagent:29b40107-87b6-4cb9-b4f6-ba43f3231071","resultFile":"/root/.openclaw/workspace/atel-sdk/.atel/results/internal-1773242673836.json"}
+{"event":"result_received","taskId":"internal-1773242673836","method":"file"}
+{"event":"task_completed","taskId":"task-1773242673414-7n5p79"}
+{"event":"history_saved","taskId":"task-1773242673414-7n5p79","memkey":null}
+{"event":"trace_finalized","taskId":"task-1773242673414-7n5p79","events":3}
+{"event":"trace_imported","taskId":"task-1773242673414-7n5p79","event_count":3,"has_tool_calls":true}
+{"event":"trust_score_updated_no_anchor","reason":"No on-chain anchor — recorded as unverified. Set ATEL_SOLANA_PRIVATE_KEY for verified proofs."}
+{"event":"trust_score_updated","did":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","score":55,"total_tasks":3,"success_rate":1,"verified_count":0}
+{"event":"trust_graph_updated","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","to":"did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw","scene":"general","nodes":2,"edges":3,"interactions":3}
+{"event":"anchor_missing","taskId":"task-1773242673414-7n5p79","warning":"Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.","timestamp":"2026-03-11T15:24:50.593Z"}
+{"event":"task_audit_summary","taskId":"task-1773242673414-7n5p79","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"general","audit":{"passed":true,"trace_hash_chain_valid":true,"trace_errors":[],"events_count":4,"trace_root":"94bdaf7bd6936a67e9182b70b3b21ca15d519c466a83b5938ed1afd2c478057c","order_price":0,"anchor_required":false,"anchor_tx":null,"anchor_verify":{"checked":false,"verified":false,"chain":null,"reason":null},"reasons":[]},"timestamp":"2026-03-11T15:24:50.593Z"}
+{"event":"task_completed","taskId":"task-1773242673414-7n5p79","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","action":"general","success":true,"audit_passed":true,"proof_id":"ff4ebaac-f989-4ea6-8e47-ef3de9bf9e6a","trace_root":"94bdaf7bd6936a67e9182b70b3b21ca15d519c466a83b5938ed1afd2c478057c","anchor_tx":null,"duration_ms":16257,"timestamp":"2026-03-11T15:24:50.593Z"}
+{"event":"result_push_starting","taskId":"task-1773242673414-7n5p79","hasSenderEndpoint":true,"hasSenderCandidates":true}
+{"event":"result_pushed","taskId":"task-1773242673414-7n5p79","to":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","via":"http://47.251.8.19:9000/relay/v1/send/did%3Aatel%3Aed25519%3AAWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","relay":true,"attempts":1}
+{"event":"callback_sent","taskId":"task-1773242673414-7n5p79","success":true}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773242814593-j45ngd","status":"completed","proof":{"proof_id":"994605e4-d3e1-4d7d-b1c3-6ef2c74be30c","trace_root":"aec267fdcc82669981fee274739ae5acf0bfa51561166c551da16869a6fa131f","events_count":4},"anchor":null,"execution":{"duration_ms":13,"encrypted":true},"result":{"error":"Tool openclaw_agent failed: 500"},"timestamp":"2026-03-11T15:27:07.469Z"}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773243110710-qruz8g","status":"completed","proof":{"proof_id":"49faa8b7-770a-4a43-890c-d6015594d7d9","trace_root":"d2a56a628ba387e103e81fa81f1762d3d312cf79dc9234c477ce30219b772364","events_count":4},"anchor":null,"execution":{"duration_ms":13,"encrypted":true},"result":{"error":"Tool openclaw_agent failed: 500"},"timestamp":"2026-03-11T15:32:03.591Z"}
+{"event":"result_received","type":"task-result","from":"did:atel:ed25519:AWzEVYtPqSTXHS3v8hdooYv2FRetDBmzjMi7LSBKsGcw","taskId":"task-1773243544964-0k88oq","status":"completed","proof":{"proof_id":"e96522c6-6c5c-44da-bac9-b4729285a6ac","trace_root":"9064e297c2d805968c95e837d199f084d6ffb18aeabf9e54dfe0286fe4f57781","events_count":4},"anchor":null,"execution":{"duration_ms":90523,"encrypted":true},"result":{"response":"已成功向 Telegram 用户发送消息：晚上好","agent":"builtin-executor","action":"internal"},"timestamp":"2026-03-11T15:40:47.811Z"}

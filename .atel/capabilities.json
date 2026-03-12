@@ -1,0 +1,14 @@
+[
+  {
+    "type": "general",
+    "description": "general"
+  },
+  {
+    "type": "coding",
+    "description": "coding"
+  },
+  {
+    "type": "research",
+    "description": "research"
+  }
+]

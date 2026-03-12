@@ -1,0 +1,41 @@
+{
+  "proofRecords": [],
+  "summaries": [
+    {
+      "executor": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "task_id": "task-1773239732411-nj6ydj",
+      "task_type": "greeting",
+      "risk_level": "low",
+      "success": true,
+      "duration_ms": 117,
+      "tool_calls": 1,
+      "policy_violations": 0,
+      "proof_id": "6b154c73-1d25-4c2c-9f31-b14b09f34f97",
+      "timestamp": "2026-03-11T14:35:32.891Z"
+    },
+    {
+      "executor": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "task_id": "task-1773241906053-wbizaw",
+      "task_type": "send",
+      "risk_level": "low",
+      "success": true,
+      "duration_ms": 16,
+      "tool_calls": 1,
+      "policy_violations": 0,
+      "proof_id": "2473a3fb-260e-4972-8a81-41a3fb1105ea",
+      "timestamp": "2026-03-11T15:11:46.995Z"
+    },
+    {
+      "executor": "did:atel:ed25519:DhFhoAuHgHCwyq2EQSoDJtHu55z57h2zK9U2QJvfcKZw",
+      "task_id": "task-1773242673414-7n5p79",
+      "task_type": "general",
+      "risk_level": "low",
+      "success": true,
+      "duration_ms": 16257,
+      "tool_calls": 1,
+      "policy_violations": 0,
+      "proof_id": "ff4ebaac-f989-4ea6-8e47-ef3de9bf9e6a",
+      "timestamp": "2026-03-11T15:24:50.083Z"
+    }
+  ]
+}

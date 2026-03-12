@@ -1,0 +1,27 @@
+{
+  "port": 3100,
+  "candidates": [
+    {
+      "type": "local",
+      "url": "http://10.3.0.7:3100",
+      "priority": 100
+    },
+    {
+      "type": "direct",
+      "url": "http://43.160.210.220:3100",
+      "priority": 50
+    },
+    {
+      "type": "relay",
+      "url": "http://47.251.8.19:9000",
+      "priority": 10
+    }
+  ],
+  "publicIP": "43.160.210.220",
+  "localIPs": [
+    "10.3.0.7"
+  ],
+  "upnpSuccess": false,
+  "relayUrl": "http://47.251.8.19:9000",
+  "configuredAt": "2026-03-11T04:26:22.970Z"
+}
