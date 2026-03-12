@@ -1,37 +1,37 @@
-# SDK 新功能：Status 命令和 Ollama 自动初始化
+# Status Command and Ollama Auto-Initialization
 
-**提交**: c94ea4f  
-**分支**: develop  
-**日期**: 2026-03-12 23:47 GMT+8  
+**Commit**: c94ea4f  
+**Branch**: develop  
+**Date**: 2026-03-12 23:47 GMT+8  
 
 ---
 
-## 🎯 新增功能
+## 🎯 New Features
 
-### 1. Ollama 自动初始化 ✅
+### 1. Ollama Auto-Initialization ✅
 
-**功能**：
-- Agent 启动时自动检查 Ollama 状态
-- 如果未运行，自动启动 Ollama 服务
-- 如果模型不存在，自动下载 `qwen2.5:0.5b`
-- 失败时降级到规则验证，不影响 Agent 运行
+**Features**:
+- Automatically checks Ollama status on agent startup
+- Auto-starts Ollama service if not running
+- Auto-downloads `qwen2.5:0.5b` model if missing
+- Gracefully degrades to rule-based verification on failure
 
-**实现**：
-- 新文件：`bin/ollama-manager.mjs`
-- 函数：
-  - `isOllamaRunning()` - 检查服务状态
-  - `startOllama()` - 启动服务
-  - `hasModel()` - 检查模型
-  - `ensureModel()` - 下载模型
-  - `initializeOllama()` - 完整初始化
-  - `getOllamaStatus()` - 获取状态
+**Implementation**:
+- New file: `bin/ollama-manager.mjs`
+- Functions:
+  - `isOllamaRunning()` - Check service status
+  - `startOllama()` - Start service
+  - `hasModel()` - Check model availability
+  - `ensureModel()` - Download model
+  - `initializeOllama()` - Complete initialization
+  - `getOllamaStatus()` - Get status
 
-**使用**：
+**Usage**:
 ```bash
-# 启动 Agent 时自动初始化
+# Auto-initialization on agent start
 node bin/atel.mjs start 14000
 
-# 输出：
+# Output:
 # [Ollama] Initializing...
 # [Ollama] Service already running
 # [Ollama] Checking model qwen2.5:0.5b...
@@ -40,19 +40,19 @@ node bin/atel.mjs start 14000
 
 ---
 
-### 2. Status 命令 ✅
+### 2. Status Command ✅
 
-**功能**：
-- 显示完整的系统健康状态
-- 可视化状态指示器（✅/❌/⚠️）
-- 支持 JSON 输出（`--json`）
+**Features**:
+- Display complete system health status
+- Visual status indicators (✅/❌/⚠️)
+- JSON output support (`--json`)
 
-**命令**：
+**Command**:
 ```bash
 node bin/atel.mjs status
 ```
 
-**输出示例**：
+**Example Output**:
 ```
 === ATEL Agent Status ===
 
@@ -67,17 +67,17 @@ Registry: http://47.251.8.19:8200
 Network:  ✅ http://43.160.230.129:14002
 ```
 
-**检查项**：
-1. **Identity** - Agent 身份是否初始化
-2. **Agent** - Agent 服务是否运行
-3. **Executor** - Executor 是否可用
-4. **Gateway** - OpenClaw Gateway 连接状态
-5. **Ollama** - Ollama 服务和模型状态
-6. **Audit** - 审计策略（分层验证）
-7. **Registry** - 注册的 Platform 地址
-8. **Network** - 网络端点和可达性
+**Status Checks**:
+1. **Identity** - Agent identity initialization
+2. **Agent** - Agent service running status
+3. **Executor** - Executor availability
+4. **Gateway** - OpenClaw Gateway connection
+5. **Ollama** - Ollama service and model status
+6. **Audit** - Audit strategy (tiered verification)
+7. **Registry** - Platform registry URL
+8. **Network** - Network endpoint and reachability
 
-**JSON 输出**：
+**JSON Output**:
 ```bash
 node bin/atel.mjs status --json
 ```
@@ -127,25 +127,25 @@ node bin/atel.mjs status --json
 
 ---
 
-## 📋 使用场景
+## 📋 Use Cases
 
-### 场景 1：诊断问题
+### Use Case 1: Troubleshooting
 
-用户报告审计失败：
+User reports audit failure:
 ```bash
 node bin/atel.mjs status
 
-# 快速发现问题：
+# Quickly identify the issue:
 # Ollama:   ❌ Not running
 ```
 
-### 场景 2：验证部署
+### Use Case 2: Deployment Verification
 
-部署后验证所有组件：
+Verify all components after deployment:
 ```bash
 node bin/atel.mjs status
 
-# 确认所有组件正常：
+# Confirm all components are healthy:
 # Identity: ✅
 # Agent:    ✅
 # Executor: ✅
@@ -153,18 +153,18 @@ node bin/atel.mjs status
 # Ollama:   ✅
 ```
 
-### 场景 3：自动化监控
+### Use Case 3: Automated Monitoring
 
 ```bash
-# 定期检查并记录
+# Periodic health checks with logging
 node bin/atel.mjs status --json >> /var/log/atel-status.log
 ```
 
 ---
 
-## 🔧 技术细节
+## 🔧 Technical Details
 
-### Ollama 初始化流程
+### Ollama Initialization Flow
 
 ```
 cmdStart()
@@ -184,39 +184,39 @@ ollama pull qwen2.5:0.5b
 Ready ✅
 ```
 
-### 审计策略
+### Audit Strategy
 
-**分层验证**（优先级从高到低）：
-1. **Gateway** - 使用 OpenClaw Gateway 调用大模型
-2. **Ollama** - 使用本地 Ollama 模型
-3. **Rule** - 基于规则的关键词匹配
+**Tiered Verification** (priority from high to low):
+1. **Gateway** - Use OpenClaw Gateway to call LLMs
+2. **Ollama** - Use local Ollama model
+3. **Rule** - Rule-based keyword matching
 
-**自动降级**：
-- Gateway 不可用 → 使用 Ollama
-- Ollama 不可用 → 使用 Rule
-- 确保审计始终可用
-
----
-
-## 📊 性能影响
-
-**启动时间**：
-- Ollama 已运行 + 模型已下载：+0.5s
-- Ollama 未运行：+3s（启动服务）
-- 模型未下载：+60s（首次下载 397MB）
-
-**内存占用**：
-- Ollama 服务：~100MB
-- qwen2.5:0.5b 模型：~400MB（磁盘）
-- 运行时：~500MB（加载到内存）
+**Automatic Fallback**:
+- Gateway unavailable → Use Ollama
+- Ollama unavailable → Use Rule
+- Ensures audit is always available
 
 ---
 
-## 🚀 升级指南
+## 📊 Performance Impact
 
-### 对于现有用户
+**Startup Time**:
+- Ollama running + model downloaded: +0.5s
+- Ollama not running: +3s (service startup)
+- Model not downloaded: +60s (first-time download 397MB)
 
-1. **拉取最新代码**：
+**Memory Usage**:
+- Ollama service: ~100MB
+- qwen2.5:0.5b model: ~400MB (disk)
+- Runtime: ~500MB (loaded in memory)
+
+---
+
+## 🚀 Upgrade Guide
+
+### For Existing Users
+
+1. **Pull latest code**:
 ```bash
 cd /opt/atel/atel-sdk-new
 git pull origin develop
@@ -224,50 +224,50 @@ npm install
 npm run build
 ```
 
-2. **重启 Agent**：
+2. **Restart agent**:
 ```bash
 pkill -f "atel.mjs start"
 ATEL_REGISTRY=http://47.251.8.19:8200 node bin/atel.mjs start 14000
 ```
 
-3. **验证状态**：
+3. **Verify status**:
 ```bash
 node bin/atel.mjs status
 ```
 
-### 对于新用户
+### For New Users
 
-无需额外操作！首次启动 Agent 时会自动：
-- 启动 Ollama
-- 下载模型
-- 配置审计
-
----
-
-## ✅ 测试结果
-
-**测试环境**：
-- 龙虾1：43.160.230.129:14002
-- Platform：47.251.8.19:8200
-
-**测试结果**：
-- ✅ Ollama 自动启动
-- ✅ 模型自动下载
-- ✅ Status 命令正常
-- ✅ Thinking 审计通过
+No additional steps required! On first agent startup, it will automatically:
+- Start Ollama
+- Download model
+- Configure audit
 
 ---
 
-## 📝 注意事项
+## ✅ Test Results
 
-1. **首次启动较慢**：首次下载模型需要 1-2 分钟
-2. **磁盘空间**：确保至少有 1GB 可用空间
-3. **网络要求**：需要访问 Ollama 模型仓库
-4. **Ollama 安装**：需要预先安装 Ollama（`curl -fsSL https://ollama.com/install.sh | sh`）
+**Test Environment**:
+- Lobster1: 43.160.230.129:14002
+- Platform: 47.251.8.19:8200
+
+**Test Results**:
+- ✅ Ollama auto-start
+- ✅ Model auto-download
+- ✅ Status command working
+- ✅ Thinking audit passed
 
 ---
 
-**功能已完成并推送到 GitHub！** 🎉
+## 📝 Notes
+
+1. **First startup is slower**: Initial model download takes 1-2 minutes
+2. **Disk space**: Ensure at least 1GB available space
+3. **Network requirement**: Need access to Ollama model repository
+4. **Ollama installation**: Requires pre-installed Ollama (`curl -fsSL https://ollama.com/install.sh | sh`)
+
+---
+
+**Features completed and pushed to GitHub!** 🎉
 
 **Commit**: c94ea4f  
 **Branch**: develop  
