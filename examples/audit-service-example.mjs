@@ -47,14 +47,14 @@ console.log('Status:', auditService.getStatus());
 // Example task
 const exampleTask = {
   task_id: 'task-123',
-  version: 'task.v0.1' as const,
+  version: 'task.v0.1',
   issuer: 'did:atel:test',
   intent: {
     type: 'calculation',
     goal: 'Calculate 25 × 4',
   },
   risk: {
-    level: 'low' as const,
+    level: 'low',
   },
   nonce: Date.now().toString(),
 };

@@ -35,7 +35,12 @@ class RuleBasedVerifier {
 
     // Check 4: Basic keyword matching
     const taskGoal = task.intent.goal.toLowerCase();
-    const thinkingText = thinking.reasoning.toLowerCase();
+    // Combine all thinking text for keyword matching
+    const thinkingText = [
+      thinking.reasoning,
+      ...thinking.steps,
+      thinking.conclusion
+    ].join(' ').toLowerCase();
     
     // Extract keywords from task (simple approach)
     const keywords = taskGoal
