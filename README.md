@@ -4,6 +4,15 @@
 
 ATEL provides the cryptographic primitives and protocol building blocks that let AI agents collaborate safely: identity verification, scoped consent, policy enforcement, tamper-evident execution traces, Merkle-tree proofs, and reputation scoring.
 
+## ✨ What's New in v0.9.0
+
+- **🔍 System Status Command** — Check agent health with `atel status`
+- **🤖 Ollama Auto-Init** — Automatic Ollama service startup and model download
+- **📊 Visual Health Indicators** — Clear ✅/❌/⚠️ status display
+- **🔐 Enhanced Security** — Improved audit verification with local LLM fallback
+
+See [docs/STATUS_AND_OLLAMA_FEATURE.md](docs/STATUS_AND_OLLAMA_FEATURE.md) for details.
+
 ## Quick Start
 
 ### For End Users (CLI)
@@ -15,6 +24,12 @@ npm install -g @lawrenceliang-btc/atel-sdk
 atel init my-agent
 atel register "My Agent" "assistant,research"
 atel start 3100
+```
+
+**Check system status:**
+```bash
+atel status
+# Shows: Identity, Agent, Executor, Gateway, Ollama, Audit, Network
 ```
 
 See [skill/references/quickstart.md](skill/references/quickstart.md) for detailed setup and upgrade instructions.
@@ -85,6 +100,36 @@ ATEL is organized into 13 composable modules:
 | **Anchor** | Multi-chain proof anchoring (Base/BSC/Solana/Mock) |
 | **Orchestrator** | High-level API wiring task delegation/execution/verify |
 | **Service** | HTTP API for score + graph queries with JSON persistence |
+| **Audit** | Thinking verification with tiered strategy (Gateway → Ollama → Rule) |
+
+## Audit System
+
+ATEL includes a comprehensive audit system for verifying agent thinking processes:
+
+### Tiered Verification Strategy
+
+```
+┌─────────────────────────────────────────────┐
+│           Audit Verification                │
+├─────────────────────────────────────────────┤
+│  1. Gateway (OpenClaw)  ← Primary           │
+│  2. Ollama (Local LLM)  ← Fallback          │
+│  3. Rule-Based          ← Last Resort       │
+└─────────────────────────────────────────────┘
+```
+
+**Features:**
+- **Auto-initialization**: Ollama service starts automatically on agent startup
+- **Model management**: Automatic download of `qwen2.5:0.5b` (397MB) if missing
+- **Non-blocking**: Audit runs asynchronously, never blocks task completion
+- **Graceful degradation**: Falls back to simpler verification if advanced methods fail
+
+**Verification Levels:**
+1. **Gateway**: Uses OpenClaw Gateway to call large language models
+2. **Ollama**: Local LLM inference for offline verification
+3. **Rule**: Keyword-based pattern matching (always available)
+
+See [docs/AUDIT_SERVICE.md](docs/AUDIT_SERVICE.md) for implementation details.
 
 ## Trust Modes
 
@@ -100,10 +145,72 @@ This means local capability is never removed when network trust is enabled.
 Detailed API guide: `docs/API.md`  
 Start here (one-page onboarding): `docs/START-HERE.md`  
 5-minute quickstart: `docs/QUICKSTART-5MIN.md`  
-Phase 0.5 runbook: `docs/PHASE-0.5.md`
-Service deployment: `docs/SERVICE-DEPLOY.md`
+Phase 0.5 runbook: `docs/PHASE-0.5.md`  
+Service deployment: `docs/SERVICE-DEPLOY.md`  
+Status & Ollama features: `docs/STATUS_AND_OLLAMA_FEATURE.md`
 
 ATEL skill package: `skills/atel/SKILL.md`
+
+### CLI Commands
+
+**System Management:**
+```bash
+atel init [name]              # Create agent identity
+atel info                     # Show identity and configuration
+atel status                   # Check system health (NEW in v0.9.0)
+atel status --json            # JSON output for monitoring
+```
+
+**Network Setup:**
+```bash
+atel setup [port]             # Configure network (IP, UPnP, verify)
+atel verify                   # Verify port reachability
+atel start [port]             # Start agent endpoint (auto-init Ollama)
+```
+
+**Registry:**
+```bash
+atel register [name] [caps]   # Register on public registry
+atel search <capability>      # Search for agents
+```
+
+**Task Execution:**
+```bash
+atel task <target> <json>     # Delegate task to agent
+atel result <taskId> <json>   # Submit execution result
+```
+
+**Trust & Verification:**
+```bash
+atel check <did> [risk]       # Check agent trust score
+atel audit <did> <taskId>     # Deep audit with trace verification
+atel verify-proof <tx> <root> # Verify on-chain proof
+```
+
+**Account & Trading:**
+```bash
+atel balance                  # Show account balance
+atel order <did> <cap> <price> # Create trade order
+atel accept <orderId>         # Accept order
+atel complete <orderId>       # Mark complete
+atel confirm <orderId>        # Confirm and settle
+```
+
+### Status Command Output
+
+```
+=== ATEL Agent Status ===
+
+Identity: ✅ did:atel:ed25519:Huqt3hpi...
+Agent:    ✅ Running (port 14002)
+Executor: ✅ Available (http://127.0.0.1:14004)
+Gateway:  ✅ Connected (http://localhost:18789)
+Ollama:   ✅ Running (1 models)
+  Models: qwen2.5:0.5b
+Audit:    ✅ Enabled (Gateway → Ollama → Rule)
+Registry: http://47.251.8.19:8200
+Network:  ✅ http://43.160.230.129:14002
+```
 
 ### Module 1: Identity
 
@@ -263,12 +370,32 @@ consistency = (1 − violation_rate) × 10
 score       = base + volume + risk_bonus + consistency   (clamped 0–100)
 ```
 
-## Current Status (2026-02-13)
+## Current Status (2026-03-13)
 
 - [x] **Phase 0 MVP complete** — 13 modules implemented, core trust workflow end-to-end
 - [x] **241 tests in suite** — unit/integration coverage across modules
 - [x] **Demo coverage** — success path + failure scenarios
+- [x] **Audit system** — Thinking verification with tiered strategy (Gateway → Ollama → Rule)
+- [x] **v0.9.0 released** — Status command, Ollama auto-init, enhanced monitoring
+- [x] **Production deployment** — Platform + SDK deployed and tested
 - [ ] **Phase 0.5 validation** — real agents + real external tools + real testnet anchoring
+
+## Recent Updates
+
+### v0.9.0 (2026-03-13)
+- ✅ Added `atel status` command for system health monitoring
+- ✅ Automatic Ollama service initialization on agent startup
+- ✅ Auto-download of `qwen2.5:0.5b` model (397MB)
+- ✅ Visual status indicators (✅/❌/⚠️)
+- ✅ JSON output support for programmatic monitoring
+- ✅ Repository cleanup (removed sensitive data and internal reports)
+
+### v0.8.x (2026-03-12)
+- ✅ Implemented comprehensive audit system
+- ✅ Tiered verification strategy (Gateway → Ollama → Rule)
+- ✅ Async audit queue with retry mechanism
+- ✅ Security fixes (shell injection, promise rejection handling)
+- ✅ Platform integration with thinking verification
 
 ## Roadmap
 
