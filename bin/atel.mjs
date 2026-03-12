@@ -1651,49 +1651,18 @@ async function cmdRegister(name, capabilities, endpointUrl) {
   let thinkingVerified = false;
   try {
     console.error('[register] Starting thinking capability audit...');
+    console.error('[register] Platform will test your model by sending a task to your endpoint...');
     
-    // Step 1: Load agent's model config
-    const modelConfigPath = resolve(ATEL_DIR, 'model-config.json');
-    if (!existsSync(modelConfigPath)) {
-      console.error('[register] ⚠️  No model-config.json found. Skipping thinking audit.');
-      console.error('[register] Create .atel/model-config.json with your model API info:');
-      console.error('[register] { "provider": "openai", "model": "gpt-4", "api_endpoint": "https://api.openai.com/v1/chat/completions", "api_key": "sk-xxx" }');
+    const auditResp = await signedFetch('POST', '/registry/v1/thinking/audit', {});
+    
+    if (auditResp.status === 'already_verified') {
+      thinkingVerified = true;
+      console.error('[register] Thinking capability already verified.');
     } else {
-      const modelConfig = JSON.parse(readFileSync(modelConfigPath, 'utf-8'));
-      
-      // Step 2: Get challenge from platform
-      const challenge = await signedFetch('POST', '/registry/v1/thinking/challenge', {});
-      
-      if (challenge.status === 'already_verified') {
-        thinkingVerified = true;
-        console.error('[register] Thinking capability already verified.');
-      } else if (challenge.status === 'challenge') {
-        console.error(`[register] Platform asks: ${challenge.prompt}`);
-        console.error(`[register] Using model: ${modelConfig.model} (${modelConfig.provider})`);
-        
-        // Step 3: Call agent's own model API
-        let modelResponse = '';
-        try {
-          modelResponse = await callModelAPI(modelConfig, challenge.prompt);
-        } catch (e) {
-          console.error(`[register] Model API call failed: ${e.message}`);
-        }
-        
-        if (!modelResponse) {
-          console.error('[register] No response from model. Thinking audit failed.');
-        } else {
-          // Step 4: Submit answer to platform
-          const result = await signedFetch('POST', '/registry/v1/thinking/verify', {
-            challenge_id: challenge.challenge_id,
-            response: modelResponse,
-          });
-          
-          thinkingVerified = result.passed === true;
-          console.error(`[register] Thinking audit: ${thinkingVerified ? '✅ PASSED' : '❌ FAILED'} (score: ${result.score})`);
-          if (result.details) {
-            console.error(`[register] Details: steps=${result.details.has_steps}, reasoning=${result.details.has_reasoning}, answer=${result.details.has_answer}`);
-          }
-        }
+      thinkingVerified = auditResp.passed === true;
+      console.error(`[register] Thinking audit: ${thinkingVerified ? '✅ PASSED' : '❌ FAILED'} (steps: ${auditResp.steps || 0})`);
+      if (auditResp.error) {
+        console.error(`[register] Error: ${auditResp.error}`);
       }
     }
   } catch (e) {
@@ -2272,73 +2241,6 @@ async function signedFetch(method, path, payload = {}) {
 }
 
 // ─── Model API Call ──────────────────────────────────────────────
-
-async function callModelAPI(config, prompt) {
-  const { provider, model, api_endpoint, api_key } = config;
-  
-  let reqBody;
-  switch (provider) {
-    case 'openai':
-    case 'deepseek':
-    case 'custom':
-      reqBody = {
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-      };
-      break;
-    case 'anthropic':
-      reqBody = {
-        model,
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-      };
-      break;
-    case 'ollama':
-      reqBody = {
-        model,
-        prompt,
-        stream: false,
-      };
-      break;
-    default:
-      throw new Error(`Unsupported provider: ${provider}`);
-  }
-
-  const headers = { 'Content-Type': 'application/json' };
-  if (api_key) {
-    if (provider === 'anthropic') {
-      headers['x-api-key'] = api_key;
-      headers['anthropic-version'] = '2023-06-01';
-    } else {
-      headers['Authorization'] = `Bearer ${api_key}`;
-    }
-  }
-
-  const resp = await fetch(api_endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(reqBody),
-    signal: AbortSignal.timeout(120000),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`API returned ${resp.status}: ${text.substring(0, 200)}`);
-  }
-
-  const data = await resp.json();
-
-  // Extract response text based on provider
-  switch (provider) {
-    case 'ollama':
-      return data.response || '';
-    case 'anthropic':
-      return data.content?.[0]?.text || '';
-    default: // openai-compatible
-      return data.choices?.[0]?.message?.content || '';
-  }
-}
 
 // ─── Account Commands ────────────────────────────────────────────
 
