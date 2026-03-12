@@ -1068,7 +1068,7 @@ async function cmdStart(port) {
     delete networkConfig.steps;
     saveNetwork(networkConfig);
   } else {
-    log({ event: 'network_loaded', candidates: networkConfig.candidates.length });
+    log({ event: 'network_loaded', candidates: networkConfig.candidates?.length || 0 });
   }
 
   // ── Start endpoint ──
@@ -1940,7 +1940,7 @@ async function cmdStart(port) {
   }, 15000);
 
   // Auto-register to Registry with candidates
-  if (capTypes.length > 0 && networkConfig.candidates.length > 0) {
+  if (capTypes.length > 0 && networkConfig.candidates && networkConfig.candidates.length > 0) {
     try {
       const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
       const bestDirect = networkConfig.candidates.find(c => c.type !== 'relay') || networkConfig.candidates[0];
@@ -1961,7 +1961,7 @@ async function cmdStart(port) {
   }
 
   // Register with relay server and start polling for relayed requests
-  const relayCandidate = networkConfig.candidates.find(c => c.type === 'relay');
+  const relayCandidate = networkConfig.candidates?.find(c => c.type === 'relay');
   if (relayCandidate) {
     const relayUrl = relayCandidate.url;
 
@@ -2028,7 +2028,7 @@ async function cmdStart(port) {
 
   console.log(JSON.stringify({
     status: 'listening', agent_id: id.agent_id, did: id.did,
-    port: p, candidates: networkConfig.candidates, capabilities: capTypes,
+    port: p, candidates: networkConfig.candidates || [], capabilities: capTypes,
     policy: { rateLimit: policy.rateLimit, maxPayloadBytes: policy.maxPayloadBytes, maxConcurrent: policy.maxConcurrent, allowedDIDs: policy.allowedDIDs.length, blockedDIDs: policy.blockedDIDs.length },
     executor: EXECUTOR_URL || 'echo mode', inbox: INBOX_FILE,
   }, null, 2));
