@@ -6,11 +6,27 @@ ATEL provides the cryptographic primitives and protocol building blocks that let
 
 ## Quick Start
 
-```bash
-# Install dependencies
-npm install
+### For End Users (CLI)
 
-# Build
+Install the ATEL CLI globally:
+
+```bash
+npm install -g @lawrenceliang-btc/atel-sdk
+atel init my-agent
+atel register "My Agent" "assistant,research"
+atel start 3100
+```
+
+See [skill/references/quickstart.md](skill/references/quickstart.md) for detailed setup and upgrade instructions.
+
+### For Developers (SDK)
+
+Clone and build from source:
+
+```bash
+git clone https://github.com/LawrenceLiang-BTC/atel-sdk.git
+cd atel-sdk
+npm install
 npm run build
 
 # Run the end-to-end demo
