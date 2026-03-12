@@ -285,16 +285,19 @@ async function signTaskRequest(taskRequest, secretKey) {
   const { default: nacl } = await import('tweetnacl');
   
   // Canonical JSON for signing (exclude orderId as it's not available yet)
+  // IMPORTANT: Keys must be in alphabetical order to match Go's json.Marshal behavior
   const signable = JSON.stringify({
-    version: taskRequest.version,
-    taskId: taskRequest.taskId,
-    requesterDid: taskRequest.requesterDid,
-    executorDid: taskRequest.executorDid,
     capability: taskRequest.capability,
     description: taskRequest.description,
+    executorDid: taskRequest.executorDid,
     payload: taskRequest.payload,
-    timestamp: taskRequest.timestamp
+    requesterDid: taskRequest.requesterDid,
+    taskId: taskRequest.taskId,
+    timestamp: taskRequest.timestamp,
+    version: taskRequest.version
   });
+  
+  console.error('[DEBUG] SDK signable JSON:', signable);
   
   const signature = nacl.sign.detached(Buffer.from(signable), secretKey);
   return Buffer.from(signature).toString('base64');
@@ -1458,6 +1461,37 @@ async function cmdStart(port) {
       log({ event: 'anchor_missing', taskId, warning: 'Proof not anchored on-chain. Set ATEL_SOLANA_PRIVATE_KEY for verifiable trust.', timestamp: new Date().toISOString() });
     }
 
+
+    // ── Automatic execution audit summary (moved before Platform Complete) ──
+    const traceAudit = trace.verify();
+    const orderPrice = Number(task?.priceAmount ?? task?.payload?.priceAmount ?? 0);
+    const isPaidOrder = taskId.startsWith('ord-') && orderPrice > 0;
+    const anchorTx = anchor?.txHash || null;
+    let anchorAudit = { checked: false, verified: false, chain: task?.chain || anchor?.chain || null, reason: null };
+    if (anchorTx) {
+      anchorAudit = await verifyAnchorFromChain(task?.chain || anchor?.chain || 'solana', anchorTx, proof.trace_root);
+    }
+
+    const auditReasons = [];
+    if (!traceAudit.valid) auditReasons.push('trace_hash_chain_invalid');
+    if (isPaidOrder && !anchorTx) auditReasons.push('paid_order_anchor_missing');
+    if (anchorTx && anchorAudit.checked && !anchorAudit.verified) auditReasons.push('anchor_verify_failed');
+
+    const auditPassed = auditReasons.length === 0;
+    const auditSummary = {
+      passed: auditPassed,
+      trace_hash_chain_valid: traceAudit.valid,
+      trace_errors: traceAudit.errors,
+      events_count: trace.events.length,
+      trace_root: proof.trace_root,
+      order_price: orderPrice,
+      anchor_required: isPaidOrder,
+      anchor_tx: anchorTx,
+      anchor_verify: anchorAudit,
+      reasons: auditReasons,
+    };
+
+
     // ── Platform Complete (async, don't block) ──
     if (ATEL_PLATFORM && taskId.startsWith('ord-')) {
       (async () => {
@@ -1500,34 +1534,6 @@ async function cmdStart(port) {
     }
 
     // ── Automatic execution audit summary (always-on) ──
-    const traceAudit = trace.verify();
-    const orderPrice = Number(task?.priceAmount ?? task?.payload?.priceAmount ?? 0);
-    const isPaidOrder = taskId.startsWith('ord-') && orderPrice > 0;
-    const anchorTx = anchor?.txHash || null;
-    let anchorAudit = { checked: false, verified: false, chain: task?.chain || anchor?.chain || null, reason: null };
-    if (anchorTx) {
-      anchorAudit = await verifyAnchorFromChain(task?.chain || anchor?.chain || 'solana', anchorTx, proof.trace_root);
-    }
-
-    const auditReasons = [];
-    if (!traceAudit.valid) auditReasons.push('trace_hash_chain_invalid');
-    if (isPaidOrder && !anchorTx) auditReasons.push('paid_order_anchor_missing');
-    if (anchorTx && anchorAudit.checked && !anchorAudit.verified) auditReasons.push('anchor_verify_failed');
-
-    const auditPassed = auditReasons.length === 0;
-    const auditSummary = {
-      passed: auditPassed,
-      trace_hash_chain_valid: traceAudit.valid,
-      trace_errors: traceAudit.errors,
-      events_count: trace.events.length,
-      trace_root: proof.trace_root,
-      order_price: orderPrice,
-      anchor_required: isPaidOrder,
-      anchor_tx: anchorTx,
-      anchor_verify: anchorAudit,
-      reasons: auditReasons,
-    };
-
     log({ event: 'task_audit_summary', taskId, from: task.from, action: task.action, audit: auditSummary, timestamp: new Date().toISOString() });
     if (!auditPassed) {
       log({ event: 'task_audit_failed', taskId, from: task.from, action: task.action, reasons: auditReasons, timestamp: new Date().toISOString() });
