@@ -56,6 +56,7 @@ import {
   TrustGraph, calculateTaskWeight,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
+import { initializeOllama, getOllamaStatus } from './ollama-manager.mjs';
 
 const ATEL_DIR = resolve(process.env.ATEL_DIR || '.atel');
 const IDENTITY_FILE = resolve(ATEL_DIR, 'identity.json');
@@ -328,6 +329,95 @@ async function cmdInfo() {
   console.log(JSON.stringify({ agent_id: id.agent_id, did: id.did, capabilities: loadCapabilities(), policy: loadPolicy(), network: loadNetwork(), executor: EXECUTOR_URL || 'not configured' }, null, 2));
 }
 
+async function cmdStatus() {
+  const id = loadIdentity();
+  const network = loadNetwork();
+  const policy = loadPolicy();
+  
+  // Check Ollama status
+  const ollamaStatus = await getOllamaStatus();
+  
+  // Check Gateway status
+  let gatewayStatus = { available: false };
+  if (ATEL_NOTIFY_GATEWAY) {
+    try {
+      const response = await fetch(`${ATEL_NOTIFY_GATEWAY}/status`, { signal: AbortSignal.timeout(2000) });
+      gatewayStatus = { available: response.ok, url: ATEL_NOTIFY_GATEWAY };
+    } catch {
+      gatewayStatus = { available: false, url: ATEL_NOTIFY_GATEWAY };
+    }
+  }
+  
+  // Check Executor status
+  let executorStatus = { available: false };
+  const executorUrl = EXECUTOR_URL || 'http://127.0.0.1:14003';
+  try {
+    const response = await fetch(`${executorUrl}/health`, { signal: AbortSignal.timeout(2000) });
+    if (response.ok) {
+      const data = await response.json();
+      executorStatus = { available: true, url: executorUrl, ...data };
+    }
+  } catch {
+    executorStatus = { available: false, url: executorUrl };
+  }
+  
+  // Check if agent is running
+  let agentStatus = { running: false };
+  if (network?.port) {
+    try {
+      const response = await fetch(`http://localhost:${network.port}/health`, { signal: AbortSignal.timeout(2000) });
+      agentStatus = { running: response.ok, port: network.port };
+    } catch {
+      agentStatus = { running: false, port: network.port };
+    }
+  }
+  
+  // Build status report
+  const status = {
+    identity: id ? { did: id.did, agent_id: id.agent_id } : null,
+    agent: agentStatus,
+    executor: executorStatus,
+    gateway: gatewayStatus,
+    ollama: ollamaStatus,
+    audit: {
+      enabled: true,
+      strategy: gatewayStatus.available ? 'Gateway → Ollama → Rule' : (ollamaStatus.running ? 'Ollama → Rule' : 'Rule only')
+    },
+    registry: REGISTRY_URL,
+    network: network ? {
+      endpoint: network.endpoint,
+      reachable: network.reachable,
+      upnp: network.upnp
+    } : null
+  };
+  
+  // Pretty print with status indicators
+  console.log('\n=== ATEL Agent Status ===\n');
+  console.log(`Identity: ${status.identity ? '✅' : '❌'} ${status.identity?.did || 'Not initialized'}`);
+  console.log(`Agent:    ${status.agent.running ? '✅' : '❌'} ${status.agent.running ? `Running (port ${status.agent.port})` : 'Not running'}`);
+  console.log(`Executor: ${status.executor.available ? '✅' : '❌'} ${status.executor.available ? `Available (${status.executor.url})` : 'Not available'}`);
+  console.log(`Gateway:  ${status.gateway.available ? '✅' : '❌'} ${status.gateway.available ? `Connected (${status.gateway.url})` : 'Not configured'}`);
+  console.log(`Ollama:   ${status.ollama.running ? '✅' : '❌'} ${status.ollama.running ? `Running (${status.ollama.models.length} models)` : 'Not running'}`);
+  
+  if (status.ollama.running && status.ollama.models.length > 0) {
+    console.log(`  Models: ${status.ollama.models.map(m => m.name).join(', ')}`);
+  }
+  
+  console.log(`Audit:    ✅ Enabled (${status.audit.strategy})`);
+  console.log(`Registry: ${status.registry}`);
+  
+  if (status.network) {
+    console.log(`Network:  ${status.network.reachable ? '✅' : '⚠️'} ${status.network.endpoint}`);
+  }
+  
+  console.log('\n');
+  
+  // Also output JSON for programmatic use
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(status, null, 2));
+  }
+}
+
 async function cmdSetup(port) {
   const p = parseInt(port || '3100');
   console.log(JSON.stringify({ event: 'network_setup', port: p }));
@@ -471,6 +561,12 @@ async function startToolGatewayProxy(port, identity, policy) {
 
 async function cmdStart(port) {
   const id = requireIdentity();
+  // Initialize Ollama (auto-start and download model)
+  await initializeOllama().catch(err => {
+    console.error(`[Ollama] Initialization failed: ${err.message}`);
+    console.error(`[Ollama] Audit will use rule-based verification only`);
+  });
+
   const p = parseInt(port || '3100');
   const caps = loadCapabilities();
   const capTypes = caps.map(c => c.type || c);
@@ -2874,6 +2970,7 @@ const args = rawArgs.filter(a => !a.startsWith('--'));
 const commands = {
   init: () => cmdInit(args[0]),
   info: () => cmdInfo(),
+  status: () => cmdStatus(),
   setup: () => cmdSetup(args[0]),
   verify: () => cmdVerify(),
   start: () => cmdStart(args[0]),
@@ -2937,6 +3034,7 @@ Usage: atel <command> [args]
 Protocol Commands:
   init [name]                          Create agent identity + security policy
   info                                 Show identity, capabilities, network, policy
+  status                               Show system status (agent, executor, gateway, ollama)
   setup [port]                         Configure network (detect IP, UPnP, verify)
   verify                               Verify port reachability
   start [port]                         Start endpoint (auto network + auto register)
