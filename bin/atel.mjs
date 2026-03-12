@@ -1651,19 +1651,67 @@ async function cmdRegister(name, capabilities, endpointUrl) {
   let thinkingVerified = false;
   try {
     console.error('[register] Starting thinking capability audit...');
-    console.error('[register] Platform will test your model by sending a task to your endpoint...');
+    console.error('[register] Starting thinking capability audit...');
     
     const auditResp = await signedFetch('POST', '/registry/v1/thinking/audit', {});
     
     if (auditResp.status === 'already_verified') {
       thinkingVerified = true;
       console.error('[register] Thinking capability already verified.');
-    } else {
-      thinkingVerified = auditResp.passed === true;
-      console.error(`[register] Thinking audit: ${thinkingVerified ? '✅ PASSED' : '❌ FAILED'} (steps: ${auditResp.steps || 0})`);
-      if (auditResp.error) {
-        console.error(`[register] Error: ${auditResp.error}`);
+    } else if (auditResp.status === 'challenge') {
+      console.error(`[register] Platform asks: ${auditResp.prompt}`);
+      
+      // Call executor to get answer with thinking chain
+      const executorUrl = process.env.ATEL_EXECUTOR_URL || 'http://127.0.0.1:14003';
+      try {
+        const execResp = await fetch(`${executorUrl}/internal/openclaw_agent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tool: 'openclaw_agent',
+            input: {
+              prompt: auditResp.prompt,
+              taskId: auditResp.challenge_id,
+            },
+          }),
+        });
+        
+        if (execResp.ok) {
+          const result = await execResp.json();
+          
+          // Extract thinking chain if not already present
+          let thinking = result.thinking;
+          if (!thinking && result.response) {
+            // Try to extract steps from response text
+            const steps = [];
+            const lines = result.response.split('\n');
+            for (const line of lines) {
+              if (/^\d+[\.\)、]/.test(line.trim()) || /^(step|第.*步)/i.test(line.trim())) {
+                steps.push(line.trim());
+              }
+            }
+            if (steps.length >= 2) {
+              thinking = { steps, reasoning: result.response, conclusion: '' };
+            }
+          }
+          
+          // Submit answer to platform
+          const submitResp = await signedFetch('POST', '/registry/v1/thinking/submit', {
+            challenge_id: auditResp.challenge_id,
+            response: result.response || '',
+            thinking: thinking || null,
+          });
+          
+          thinkingVerified = submitResp.passed === true;
+          console.error(`[register] Thinking audit: ${thinkingVerified ? '✅ PASSED' : '❌ FAILED'} (steps: ${submitResp.steps || 0})`);
+        } else {
+          console.error(`[register] Executor failed: ${execResp.status}`);
+        }
+      } catch (e) {
+        console.error(`[register] Failed to answer challenge: ${e.message}`);
       }
+    } else {
+      console.error(`[register] Unexpected audit response: ${auditResp.status}`);
     }
   } catch (e) {
     console.error(`[register] Thinking audit error: ${e.message}`);
