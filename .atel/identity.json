@@ -1,0 +1,6 @@
+{
+  "agent_id": "test-agent",
+  "did": "did:atel:ed25519:GUYv2Z5kivRCSwDKUUGV4z3SS8cbUpNuZ1gLyb1FL9DN",
+  "publicKey": "e5ee1240ee1595f7b882b040ad60bb26f70d0a95e7ce526d205e2bd432fcfd45",
+  "secretKey": "85f28e190720b692f5bd66e393fbe12dc7efa25a20da261b59036be63758b66ae5ee1240ee1595f7b882b040ad60bb26f70d0a95e7ce526d205e2bd432fcfd45"
+}

@@ -21,6 +21,9 @@ import express from 'express';
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
+import { TieredAuditVerifier } from '../audit/tiered-verifier.js';
+import { LLMThinkingVerifier } from '../audit/llm-verifier.js';
+import type { Task } from '../schema/index.js';
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -39,6 +42,14 @@ export interface BuiltinExecutorConfig {
   toolProxyUrl?: string;
   /** Logger function */
   log?: (obj: Record<string, unknown>) => void;
+  /** Enable tiered thinking audit */
+  enableThinkingAudit?: boolean;
+  /** Ollama endpoint for LLM audit (optional) */
+  ollamaEndpoint?: string;
+  /** Ollama model for LLM audit (optional) */
+  ollamaModel?: string;
+  /** Require thinking capability from agent model */
+  requireThinkingCapability?: boolean;
 }
 
 export interface ExecutorAuditResult {
@@ -64,6 +75,7 @@ export class BuiltinExecutor {
   private agentContext: string = '';
   private taskHistoryPath: string = '';
   private log: (obj: Record<string, unknown>) => void;
+  private auditVerifier: TieredAuditVerifier | null = null;
 
   constructor(config: BuiltinExecutorConfig) {
     this.config = {
@@ -90,6 +102,18 @@ export class BuiltinExecutor {
 
     // Task history path
     this.taskHistoryPath = join(process.cwd(), '.atel', 'task-history.md');
+
+    // Initialize tiered audit verifier if enabled
+    if (config.enableThinkingAudit) {
+      const llmVerifier = new LLMThinkingVerifier({
+        endpoint: config.ollamaEndpoint || 'http://localhost:11434',
+        modelName: config.ollamaModel || 'qwen2.5:0.5b',
+      });
+      this.auditVerifier = new TieredAuditVerifier(llmVerifier, {
+        requireThinkingCapability: config.requireThinkingCapability ?? true,
+      });
+      this.log({ event: 'audit_verifier_initialized', ollama: config.ollamaEndpoint, model: config.ollamaModel });
+    }
 
     // Setup express
     this.app = express();
@@ -271,6 +295,68 @@ export class BuiltinExecutor {
       const thinkingChain = this.extractThinkingChain(result);
       if (thinkingChain) {
         this.log({ event: 'thinking_chain_extracted', taskId, steps: thinkingChain.steps.length });
+        
+        // ── Tiered audit verification ──
+        if (this.auditVerifier) {
+          try {
+            // Construct Task object from request
+            const task: Task = {
+              task_id: taskId,
+              version: 'task.v0.1',
+              issuer: from,
+              intent: {
+                type: action,
+                goal: typeof payload === 'object' && payload !== null && 'goal' in payload 
+                  ? String(payload.goal) 
+                  : action,
+              },
+              risk: {
+                level: (typeof payload === 'object' && payload !== null && 'risk' in payload
+                  ? String((payload as any).risk)
+                  : 'medium') as 'low' | 'medium' | 'high' | 'critical',
+              },
+              nonce: Date.now().toString(),
+            };
+
+            // Extract model info from result or config
+            const modelInfo = {
+              name: typeof result === 'object' && result !== null && 'agent' in result
+                ? String((result as any).agent)
+                : 'unknown',
+              hasThinking: true, // We already extracted thinking chain
+            };
+
+            const auditResult = await this.auditVerifier.verify(task, thinkingChain, modelInfo);
+            
+            if (!auditResult.passed) {
+              this.log({ 
+                event: 'thinking_audit_failed', 
+                taskId, 
+                violations: auditResult.violations,
+                confidence: auditResult.confidence 
+              });
+              
+              // Reject task if audit failed
+              const errorMsg = `Thinking audit failed: ${auditResult.violations.join(', ')}`;
+              if (toolProxy) {
+                await this.finalizeTool(toolProxy, taskId, false, { error: errorMsg });
+              }
+              await this.callback(taskId, { error: errorMsg, audit: auditResult }, false);
+              return;
+            }
+            
+            this.log({ 
+              event: 'thinking_audit_passed', 
+              taskId, 
+              confidence: auditResult.confidence 
+            });
+          } catch (auditError: unknown) {
+            const msg = auditError instanceof Error ? auditError.message : String(auditError);
+            this.log({ event: 'thinking_audit_error', taskId, error: msg });
+            // Continue execution even if audit fails (best effort)
+          }
+        }
+        
         // Append thinking chain to trace via toolProxy
         if (toolProxy) {
           try {
@@ -291,6 +377,17 @@ export class BuiltinExecutor {
         }
       } else {
         this.log({ event: 'thinking_chain_missing', taskId, warning: 'Model did not produce thinking chain' });
+        
+        // If thinking audit is enabled and required, reject tasks without thinking
+        if (this.auditVerifier && this.config.requireThinkingCapability) {
+          const errorMsg = 'Task rejected: Model did not produce required thinking chain';
+          this.log({ event: 'task_rejected', taskId, reason: errorMsg });
+          if (toolProxy) {
+            await this.finalizeTool(toolProxy, taskId, false, { error: errorMsg });
+          }
+          await this.callback(taskId, { error: errorMsg }, false);
+          return;
+        }
       }
 
       // ── Save task history ──
