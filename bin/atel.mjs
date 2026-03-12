@@ -74,6 +74,8 @@ const NETWORK_FILE = resolve(ATEL_DIR, 'network.json');
 const TRACES_DIR = resolve(ATEL_DIR, 'traces');
 const PENDING_FILE = resolve(ATEL_DIR, 'pending-tasks.json');
 const RESULT_PUSH_QUEUE_FILE = resolve(ATEL_DIR, 'pending-result-pushes.json');
+const KEYS_DIR = resolve(ATEL_DIR, 'keys');
+const ANCHOR_FILE = resolve(KEYS_DIR, 'anchor.json');
 
 const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], taskMode: 'auto', autoAcceptPlatform: true, autoAcceptP2P: true, trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
 
@@ -88,6 +90,91 @@ function requireIdentity() { const id = loadIdentity(); if (!id) { console.error
 
 function loadCapabilities() { const f = resolve(ATEL_DIR, 'capabilities.json'); if (!existsSync(f)) return []; try { return JSON.parse(readFileSync(f, 'utf-8')); } catch { return []; } }
 function saveCapabilities(c) { ensureDir(); writeFileSync(resolve(ATEL_DIR, 'capabilities.json'), JSON.stringify(c, null, 2)); }
+
+// Parse capabilities string with optional pricing (e.g., "command_exec:10,web_search:5,file_read")
+// Strict mode: validates price format and reports errors
+function parseCapabilitiesWithPricing(capString) {
+  if (!capString) return [];
+  
+  const caps = capString.split(',').map(s => s.trim()).filter(s => s);
+  const errors = [];
+  
+  const result = caps.map((cap, index) => {
+    const parts = cap.split(':');
+    const type = parts[0].trim();
+    
+    if (!type) {
+      errors.push(`Capability ${index + 1}: type is empty`);
+      return null;
+    }
+    
+    const capResult = {
+      type: type,
+      description: `${type} capability`
+    };
+    
+    // If there's a colon, user wants to set a price
+    if (parts.length > 1) {
+      const priceStr = parts[1].trim();
+      
+      // Check for too many colons
+      if (parts.length > 2) {
+        errors.push(`Capability "${type}": invalid format (too many colons). Use "type:price"`);
+        return null;
+      }
+      
+      // Check if price is empty
+      if (!priceStr) {
+        errors.push(`Capability "${type}": price is empty. Use "type:price" or just "type" for free`);
+        return null;
+      }
+      
+      // Parse price
+      const price = parseFloat(priceStr);
+      
+      // Check if price is valid
+      if (isNaN(price)) {
+        errors.push(`Capability "${type}": invalid price "${priceStr}". Must be a number`);
+        return null;
+      }
+      
+      // Check if price is negative
+      if (price < 0) {
+        errors.push(`Capability "${type}": price cannot be negative (${price})`);
+        return null;
+      }
+      
+      // Price = 0 means free (valid)
+      if (price === 0) {
+        return capResult;
+      }
+      
+      // Price > 0, add pricing
+      capResult.pricing = {
+        minPrice: price,
+        currency: 'USD',
+        pricingModel: 'per_task'
+      };
+    }
+    
+    return capResult;
+  }).filter(c => c !== null);
+  
+  // If there are errors, display and exit
+  if (errors.length > 0) {
+    console.error('\n❌ Capability format errors:\n');
+    errors.forEach(err => console.error(`  - ${err}`));
+    console.error('\nFormat: "type1:price1,type2:price2,type3" (omit price for free capabilities)');
+    console.error('Examples:');
+    console.error('  - "command_exec:10,web_search:5,file_read"');
+    console.error('  - "command_exec:10.5,web_search:0" (0 = free)');
+    console.error('  - "command_exec,web_search" (all free)');
+    process.exit(1);
+  }
+  
+  return result;
+}
+
 function loadPolicy() { if (!existsSync(POLICY_FILE)) return { ...DEFAULT_POLICY }; try { return { ...DEFAULT_POLICY, ...JSON.parse(readFileSync(POLICY_FILE, 'utf-8')) }; } catch { return { ...DEFAULT_POLICY }; } }
 function savePolicy(p) { ensureDir(); writeFileSync(POLICY_FILE, JSON.stringify(p, null, 2)); }
 function loadTasks() { if (!existsSync(TASKS_FILE)) return {}; try { return JSON.parse(readFileSync(TASKS_FILE, 'utf-8')); } catch { return {}; } }
@@ -101,11 +188,45 @@ function savePending(p) { ensureDir(); writeFileSync(PENDING_FILE, JSON.stringif
 function loadResultPushQueue() { if (!existsSync(RESULT_PUSH_QUEUE_FILE)) return []; try { const q = JSON.parse(readFileSync(RESULT_PUSH_QUEUE_FILE, 'utf-8')); return Array.isArray(q) ? q : []; } catch { return []; } }
 function saveResultPushQueue(items) { ensureDir(); writeFileSync(RESULT_PUSH_QUEUE_FILE, JSON.stringify(items, null, 2)); }
 
-// Derive wallet addresses from env private keys
+// Anchor configuration (on-chain anchoring for paid orders)
+function loadAnchorConfig() { 
+  if (!existsSync(ANCHOR_FILE)) return null; 
+  try { return JSON.parse(readFileSync(ANCHOR_FILE, 'utf-8')); } catch { return null; } 
+}
+function saveAnchorConfig(config) { 
+  if (!existsSync(KEYS_DIR)) mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 }); 
+  writeFileSync(ANCHOR_FILE, JSON.stringify(config, null, 2), { mode: 0o600 }); 
+  // Verify permissions
+  try {
+    const stats = statSync(ANCHOR_FILE);
+    if ((stats.mode & 0o777) !== 0o600) {
+      console.warn('⚠️  Warning: Failed to set secure permissions on anchor.json');
+      console.warn('   Run: chmod 600 .atel/keys/anchor.json');
+    }
+  } catch (e) {
+    // Ignore permission check errors on Windows
+  }
+}
+function getChainPrivateKey(chain) {
+  // 1. Try config file first
+  const config = loadAnchorConfig();
+  if (config?.chains?.[chain]?.privateKey) {
+    return config.chains[chain].privateKey;
+  }
+  // 2. Fall back to environment variables (backward compatibility)
+  if (chain === 'solana') return process.env.ATEL_SOLANA_PRIVATE_KEY;
+  if (chain === 'base') return process.env.ATEL_BASE_PRIVATE_KEY;
+  if (chain === 'bsc') return process.env.ATEL_BSC_PRIVATE_KEY;
+  return null;
+}
+
+// Derive wallet addresses from private keys (config file or env)
 async function getWalletAddresses() {
   const wallets = {};
+  const config = loadAnchorConfig();
+  
   // Solana: base58 private key → public key
-  const solKey = process.env.ATEL_SOLANA_PRIVATE_KEY;
+  const solKey = getChainPrivateKey('solana');
   if (solKey) {
     try {
       const { Keypair } = await import('@solana/web3.js');
@@ -113,32 +234,95 @@ async function getWalletAddresses() {
       const kp = Keypair.fromSecretKey(bs58.decode(solKey));
       wallets.solana = kp.publicKey.toBase58();
     } catch {}
+  } else if (config?.chains?.solana?.address) {
+    wallets.solana = config.chains.solana.address;
   }
+  
   // Base: hex private key → address
-  const baseKey = process.env.ATEL_BASE_PRIVATE_KEY;
+  const baseKey = getChainPrivateKey('base');
   if (baseKey) {
     try {
       const { ethers } = await import('ethers');
       wallets.base = new ethers.Wallet(baseKey).address;
     } catch {}
+  } else if (config?.chains?.base?.address) {
+    wallets.base = config.chains.base.address;
   }
+  
   // BSC: hex private key → address
-  const bscKey = process.env.ATEL_BSC_PRIVATE_KEY;
+  const bscKey = getChainPrivateKey('bsc');
   if (bscKey) {
     try {
       const { ethers } = await import('ethers');
       wallets.bsc = new ethers.Wallet(bscKey).address;
     } catch {}
+  } else if (config?.chains?.bsc?.address) {
+    wallets.bsc = config.chains.bsc.address;
   }
+  
   return Object.keys(wallets).length > 0 ? wallets : undefined;
 }
 
-// Detect preferred chain based on configured private keys
+// Detect preferred chain based on configured private keys (config file or env)
 function detectPreferredChain() {
-  if (process.env.ATEL_SOLANA_PRIVATE_KEY) return 'solana';
-  if (process.env.ATEL_BASE_PRIVATE_KEY) return 'base';
-  if (process.env.ATEL_BSC_PRIVATE_KEY) return 'bsc';
+  const config = loadAnchorConfig();
+  if (config?.preferredChain) return config.preferredChain;
+  if (getChainPrivateKey('solana')) return 'solana';
+  if (getChainPrivateKey('base')) return 'base';
+  if (getChainPrivateKey('bsc')) return 'bsc';
   return null;
+}
+
+// ─── Task Request Signing (for security) ─────────────────────────
+
+// Generate unique task ID
+function generateTaskId() {
+  return `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Sign task request (Requester signs to prove task origin)
+async function signTaskRequest(taskRequest, secretKey) {
+  const { default: nacl } = await import('tweetnacl');
+  
+  // Canonical JSON for signing (exclude orderId as it's not available yet)
+  const signable = JSON.stringify({
+    version: taskRequest.version,
+    taskId: taskRequest.taskId,
+    requesterDid: taskRequest.requesterDid,
+    executorDid: taskRequest.executorDid,
+    capability: taskRequest.capability,
+    description: taskRequest.description,
+    payload: taskRequest.payload,
+    timestamp: taskRequest.timestamp
+  });
+  
+  const signature = nacl.sign.detached(Buffer.from(signable), secretKey);
+  return Buffer.from(signature).toString('base64');
+}
+
+// Verify task request signature
+async function verifyTaskSignature(taskRequest, signature, publicKeyHex) {
+  const { default: nacl } = await import('tweetnacl');
+  
+  // Canonical JSON for verification
+  const signable = JSON.stringify({
+    version: taskRequest.version,
+    taskId: taskRequest.taskId,
+    requesterDid: taskRequest.requesterDid,
+    executorDid: taskRequest.executorDid,
+    capability: taskRequest.capability,
+    description: taskRequest.description,
+    payload: taskRequest.payload,
+    timestamp: taskRequest.timestamp
+  });
+  
+  try {
+    const publicKey = Buffer.from(publicKeyHex, 'hex');
+    const sig = Buffer.from(signature, 'base64');
+    return nacl.sign.detached.verify(Buffer.from(signable), sig, publicKey);
+  } catch (e) {
+    return false;
+  }
 }
 
 // ─── Unified Trust Score & Level System ──────────────────────────
@@ -269,24 +453,21 @@ async function anchorOnChain(traceRoot, metadata, preferredChain) {
   if (!chain) return null;
 
   try {
+    const key = getChainPrivateKey(chain);
+    if (!key) return null;
+    
     let provider;
     if (chain === 'solana') {
-      const key = process.env.ATEL_SOLANA_PRIVATE_KEY;
-      if (!key) return null;
       provider = new SolanaAnchorProvider({ 
         rpcUrl: process.env.ATEL_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', 
         privateKey: key 
       });
     } else if (chain === 'base') {
-      const key = process.env.ATEL_BASE_PRIVATE_KEY;
-      if (!key) return null;
       provider = new BaseAnchorProvider({ 
         rpcUrl: process.env.ATEL_BASE_RPC_URL || 'https://mainnet.base.org', 
         privateKey: key 
       });
     } else if (chain === 'bsc') {
-      const key = process.env.ATEL_BSC_PRIVATE_KEY;
-      if (!key) return null;
       provider = new BSCAnchorProvider({ 
         rpcUrl: process.env.ATEL_BSC_RPC_URL || 'https://bsc-dataseed.binance.org', 
         privateKey: key 
@@ -309,6 +490,115 @@ async function anchorOnChain(traceRoot, metadata, preferredChain) {
   }
 }
 
+// ─── Interactive Input Helpers ───────────────────────────────────
+
+async function promptYesNo(question) {
+  const readline = await import('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  return new Promise((resolve) => {
+    rl.question(`${question} (y/n): `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes');
+    });
+  });
+}
+
+async function promptChoice(question, choices) {
+  const readline = await import('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  console.log(question);
+  choices.forEach((c, i) => console.log(`  ${i + 1}. ${c}`));
+  
+  return new Promise((resolve) => {
+    rl.question('Select (1-3): ', (answer) => {
+      rl.close();
+      const idx = parseInt(answer) - 1;
+      resolve(choices[idx] || choices[0]);
+    });
+  });
+}
+
+async function promptInput(question) {
+  const readline = await import('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  return new Promise((resolve) => {
+    rl.question(`${question} `, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+// ─── Anchor Configuration ────────────────────────────────────────
+
+async function configureAnchor() {
+  console.log('\n🔗 Configure On-Chain Anchoring\n');
+  
+  // 1. Select chain
+  const chain = await promptChoice(
+    'Select blockchain for anchoring:',
+    ['solana', 'bsc', 'base']
+  );
+  
+  // 2. Input private key
+  const privateKey = await promptInput(
+    `Enter ${chain.toUpperCase()} private key:`
+  );
+  
+  if (!privateKey) {
+    console.error('❌ Private key is required');
+    process.exit(1);
+  }
+  
+  // 3. Validate private key and derive address
+  let address;
+  try {
+    if (chain === 'solana') {
+      const { Keypair } = await import('@solana/web3.js');
+      const bs58 = (await import('bs58')).default;
+      const kp = Keypair.fromSecretKey(bs58.decode(privateKey));
+      address = kp.publicKey.toBase58();
+    } else {
+      const { ethers } = await import('ethers');
+      const wallet = new ethers.Wallet(privateKey);
+      address = wallet.address;
+    }
+  } catch (e) {
+    console.error(`❌ Invalid ${chain.toUpperCase()} private key: ${e.message}`);
+    process.exit(1);
+  }
+  
+  // 4. Save configuration
+  const anchorConfig = {
+    enabled: true,
+    preferredChain: chain,
+    chains: {
+      [chain]: {
+        privateKey: privateKey,
+        address: address,
+        configuredAt: new Date().toISOString()
+      }
+    }
+  };
+  
+  saveAnchorConfig(anchorConfig);
+  
+  console.log(`✅ ${chain.toUpperCase()} anchor configured`);
+  console.log(`   Address: ${address}`);
+}
+
 // ─── Commands ────────────────────────────────────────────────────
 
 async function cmdInit(agentId) {
@@ -316,12 +606,86 @@ async function cmdInit(agentId) {
   const identity = new AgentIdentity({ agent_id: name });
   saveIdentity(identity);
   savePolicy(DEFAULT_POLICY);
+  
   // Create default agent-context.md for built-in executor
   const ctxFile = resolve(ATEL_DIR, 'agent-context.md');
   if (!existsSync(ctxFile)) {
     writeFileSync(ctxFile, `# Agent Context\n\nYou are an ATEL agent (${name}) processing tasks from other agents via the ATEL protocol.\n\n## Guidelines\n- Complete the task accurately and concisely\n- Return only the requested result, no extra commentary\n- If the task is unclear, do your best interpretation\n- Do not access private files or sensitive data\n- Do not make external network requests unless the task requires it\n`);
   }
-  console.log(JSON.stringify({ status: 'created', agent_id: identity.agent_id, did: identity.did, policy: POLICY_FILE, next: 'Run: atel start [port] — auto-configures network and registers' }, null, 2));
+  
+  // Ask about paid order services
+  console.log('');
+  const providePaidOrders = await promptYesNo(
+    'Do you want to provide paid order services? (requires on-chain anchoring)'
+  );
+  
+  let anchorConfigured = false;
+  if (providePaidOrders) {
+    try {
+      await configureAnchor();
+      anchorConfigured = true;
+    } catch (e) {
+      console.error(`❌ Failed to configure anchor: ${e.message}`);
+    }
+  }
+  
+  console.log(JSON.stringify({ 
+    status: 'created', 
+    agent_id: identity.agent_id, 
+    did: identity.did, 
+    policy: POLICY_FILE,
+    anchor: anchorConfigured ? 'configured' : 'disabled',
+    next: 'Run: atel start [port] — auto-configures network and registers' 
+  }, null, 2));
+}
+
+async function cmdAnchor(subcommand) {
+  if (subcommand === 'config') {
+    await configureAnchor();
+  } else if (subcommand === 'info') {
+    const config = loadAnchorConfig();
+    if (!config) {
+      console.log(JSON.stringify({ status: 'not_configured', message: 'No anchor configuration found' }, null, 2));
+      return;
+    }
+    const chains = Object.keys(config.chains || {});
+    const addresses = {};
+    for (const chain of chains) {
+      addresses[chain] = config.chains[chain].address;
+    }
+    console.log(JSON.stringify({
+      enabled: config.enabled,
+      preferredChain: config.preferredChain,
+      chains: chains,
+      addresses: addresses
+    }, null, 2));
+  } else if (subcommand === 'enable') {
+    const config = loadAnchorConfig();
+    if (!config) {
+      console.error('❌ No anchor configuration found. Run: atel anchor config');
+      process.exit(1);
+    }
+    config.enabled = true;
+    saveAnchorConfig(config);
+    console.log('✅ Anchor enabled');
+  } else if (subcommand === 'disable') {
+    const config = loadAnchorConfig();
+    if (!config) {
+      console.error('❌ No anchor configuration found');
+      process.exit(1);
+    }
+    config.enabled = false;
+    saveAnchorConfig(config);
+    console.log('✅ Anchor disabled');
+  } else {
+    console.log('Usage: atel anchor <config|info|enable|disable>');
+    console.log('');
+    console.log('Commands:');
+    console.log('  config   Configure on-chain anchoring');
+    console.log('  info     Show anchor configuration');
+    console.log('  enable   Enable on-chain anchoring');
+    console.log('  disable  Disable on-chain anchoring');
+  }
 }
 
 async function cmdInfo() {
@@ -1606,8 +1970,11 @@ async function cmdInbox(count) {
 async function cmdRegister(name, capabilities, endpointUrl) {
   const id = requireIdentity();
   const policy = loadPolicy();
-  const caps = (capabilities || 'general').split(',').map(c => ({ type: c.trim(), description: c.trim() }));
+  
+  // Parse capabilities with optional pricing (e.g., "command_exec:10,web_search:5")
+  const caps = parseCapabilitiesWithPricing(capabilities || 'general');
   saveCapabilities(caps);
+  
   let ep = endpointUrl;
   const net = loadNetwork();
   if (!ep) { ep = net?.endpoint || 'http://localhost:3100'; }
@@ -1629,11 +1996,20 @@ async function cmdRegister(name, capabilities, endpointUrl) {
   if (!wallets || !preferredChain) {
     console.error('[register] INFO: registered without published chain readiness. Yellow page registration still works. Free tasks can run normally. Paid orders require an anchoring key at execution time; re-register or restart later if you want wallets/preferredChain shown in the registry.');
   }
+  
+  // Display registration info with pricing
+  const capDisplay = caps.map(c => {
+    if (c.pricing?.minPrice > 0) {
+      return `${c.type} (min: $${c.pricing.minPrice.toFixed(2)})`;
+    }
+    return `${c.type} (free)`;
+  });
+  
   console.log(JSON.stringify({
     status: 'registered',
     did: entry.did,
     name: entry.name,
-    capabilities: caps.map(c => c.type),
+    capabilities: capDisplay,
     endpoint: ep,
     discoverable,
     wallets: wallets || null,
@@ -1645,7 +2021,40 @@ async function cmdRegister(name, capabilities, endpointUrl) {
 async function cmdSearch(capability) {
   const client = new RegistryClient({ registryUrl: REGISTRY_URL });
   const result = await client.search({ type: capability, limit: 10 });
-  console.log(JSON.stringify(result, null, 2));
+  
+  // Enhanced display with pricing info
+  if (result.agents && result.agents.length > 0) {
+    console.log(`\nFound ${result.agents.length} agent(s) with capability: ${capability}\n`);
+    
+    for (const agent of result.agents) {
+      console.log(`Agent: ${agent.name} (${agent.did})`);
+      console.log('Capabilities:');
+      
+      if (Array.isArray(agent.capabilities)) {
+        for (const cap of agent.capabilities) {
+          if (typeof cap === 'string') {
+            console.log(`  - ${cap} (free)`);
+          } else if (cap.type) {
+            const price = cap.pricing?.minPrice;
+            if (price && price > 0) {
+              console.log(`  - ${cap.type} (min: $${price.toFixed(2)})`);
+            } else {
+              console.log(`  - ${cap.type} (free)`);
+            }
+          }
+        }
+      }
+      
+      console.log(`Endpoint: ${agent.endpoint || 'N/A'}`);
+      if (agent.wallets) {
+        const chains = Object.keys(agent.wallets).join(', ');
+        console.log(`Chains: ${chains}`);
+      }
+      console.log('');
+    }
+  } else {
+    console.log('No agents found');
+  }
 }
 
 function safeReadJsonObject(path, fallback = {}) {
@@ -2305,10 +2714,57 @@ async function cmdTradeTask(capability, description) {
 async function cmdOrder(executorDid, capType, price) {
   if (!executorDid || !capType || !price) { console.error('Usage: atel order <executorDid> <capabilityType> <price> [--desc "task description"]'); process.exit(1); }
   const description = rawArgs.find((a, i) => rawArgs[i-1] === '--desc') || '';
-  const data = await signedFetch('POST', '/trade/v1/order', {
-    executorDid, capabilityType: capType, priceAmount: parseFloat(price), priceCurrency: 'USD', pricingModel: 'per_task', description,
-  });
-  console.log(JSON.stringify(data, null, 2));
+  const id = requireIdentity();
+  
+  try {
+    // Create task request (version 2 with signature)
+    const taskRequest = {
+      version: 2,
+      orderId: null,  // Will be filled by Platform
+      taskId: generateTaskId(),
+      requesterDid: id.did,
+      executorDid: executorDid,
+      capability: capType,
+      description: description,
+      payload: description ? { description } : {},
+      timestamp: new Date().toISOString()
+    };
+    
+    // Sign task request
+    const taskSignature = await signTaskRequest(taskRequest, id.secretKey);
+    
+    // Send to Platform
+    const data = await signedFetch('POST', '/trade/v1/order', {
+      executorDid,
+      capabilityType: capType,
+      priceAmount: parseFloat(price),
+      priceCurrency: 'USD',
+      pricingModel: 'per_task',
+      description,
+      version: 2,  // New version with signature
+      taskRequest: taskRequest,
+      taskSignature: taskSignature
+    });
+    
+    console.log(JSON.stringify(data, null, 2));
+  } catch (error) {
+    // Try to parse error message for price validation failure
+    const errorMsg = error.message || '';
+    const priceMatch = errorMsg.match(/minimum ([\d.]+) (\w+) for (\w+)/);
+    
+    if (priceMatch) {
+      const [, minPrice, currency, capability] = priceMatch;
+      console.error('\n❌ Order creation failed: price too low\n');
+      console.error(`Executor requires minimum $${parseFloat(minPrice).toFixed(2)} ${currency} for ${capability}`);
+      console.error(`Your offer: $${parseFloat(price).toFixed(2)} ${currency}\n`);
+      console.error(`Suggestion: Increase your offer to at least $${parseFloat(minPrice).toFixed(2)}`);
+      process.exit(1);
+    }
+    
+    // Other errors
+    console.error('Order creation failed:', errorMsg);
+    process.exit(1);
+  }
 }
 
 async function cmdOrderInfo(orderId) {
@@ -2354,6 +2810,43 @@ async function cmdComplete(orderId, taskId) {
     requesterDid = orderInfo.requesterDid || 'unknown';
   } catch (e) { console.error(`[complete] Warning: could not fetch order info: ${e.message}`); }
 
+  // ========== Verify Requester Signature (version >= 2) ==========
+  if (orderInfo && orderInfo.version >= 2) {
+    if (!orderInfo.taskRequest || !orderInfo.taskSignature) {
+      console.error('[complete] ERROR: Order version 2+ requires taskRequest and taskSignature');
+      process.exit(1);
+    }
+
+    // Extract requester public key from DID
+    const requesterPublicKey = orderInfo.requesterDid.split(':')[3]; // did:atel:ed25519:PUBLIC_KEY
+
+    // Verify signature
+    const valid = await verifyTaskSignature(
+      orderInfo.taskRequest,
+      orderInfo.taskSignature,
+      requesterPublicKey
+    );
+
+    if (!valid) {
+      console.error('[complete] ERROR: Invalid task signature from requester');
+      process.exit(1);
+    }
+
+    // Verify taskRequest matches order
+    if (orderInfo.taskRequest.orderId !== orderId) {
+      console.error('[complete] ERROR: Order ID mismatch in taskRequest');
+      process.exit(1);
+    }
+
+    if (orderInfo.taskRequest.executorDid !== id.did) {
+      console.error('[complete] ERROR: Executor DID mismatch in taskRequest');
+      process.exit(1);
+    }
+
+    console.error('[complete] Task signature verified successfully');
+  }
+  // ========== Signature Verification End ==========
+
   // ── ContentAuditor: audit the completion context ──
   const auditor = new ContentAuditor();
   const auditResult = auditor.audit({ orderId, taskId: effectiveTaskId, action: 'complete' }, { action: 'complete', from: requesterDid });
@@ -2394,7 +2887,23 @@ async function cmdComplete(orderId, taskId) {
   if (!proof) {
     console.error('[complete] Generating execution trace + proof...');
     trace = new ExecutionTrace(effectiveTaskId, id);
-    trace.append('TASK_RECEIVED', { orderId, taskId: effectiveTaskId, requesterDid });
+    
+    // ========== Include taskRequest and signature in trace (version >= 2) ==========
+    if (orderInfo && orderInfo.version >= 2) {
+      trace.append('TASK_RECEIVED', {
+        orderId,
+        taskId: effectiveTaskId,
+        requesterDid,
+        taskRequest: orderInfo.taskRequest,
+        taskSignature: orderInfo.taskSignature,
+        verifiedAt: new Date().toISOString()
+      });
+    } else {
+      // Legacy: no signature
+      trace.append('TASK_RECEIVED', { orderId, taskId: effectiveTaskId, requesterDid });
+    }
+    // ========== End ==========
+    
     trace.append('CONTENT_AUDIT', { result: auditResult.blocked ? 'blocked' : 'passed', warnings: auditResult.warnings || [] });
     trace.append('POLICY_CHECK', { result: 'passed' });
     trace.append('EXECUTION', { mode: 'cli-complete', orderId });
@@ -2783,6 +3292,7 @@ const args = rawArgs.filter(a => !a.startsWith('--'));
 const commands = {
   init: () => cmdInit(args[0]),
   info: () => cmdInfo(),
+  anchor: () => cmdAnchor(args[0]),
   setup: () => cmdSetup(args[0]),
   verify: () => cmdVerify(),
   start: () => cmdStart(args[0]),
@@ -2846,12 +3356,13 @@ Usage: atel <command> [args]
 Protocol Commands:
   init [name]                          Create agent identity + security policy
   info                                 Show identity, capabilities, network, policy
+  anchor <config|info|enable|disable>  Manage on-chain anchoring configuration
   setup [port]                         Configure network (detect IP, UPnP, verify)
   verify                               Verify port reachability
   start [port]                         Start endpoint (auto network + auto register)
   inbox [count]                        Show received messages (default: 20)
-  register [name] [caps] [endpoint]    Register on public registry
-  search <capability>                  Search registry for agents
+  register [name] [caps] [endpoint]    Register on public registry (caps: "type1:price1,type2:price2" or "type1,type2" for free)
+  search <capability>                  Search registry for agents (shows pricing info)
   handshake <endpoint> [did]           Handshake with remote agent
   task <target> <json>                 Delegate task (auto trust check)
   result <taskId> <json>               Submit execution result (from executor)
