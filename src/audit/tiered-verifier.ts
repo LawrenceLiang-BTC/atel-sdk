@@ -1,7 +1,7 @@
 import type { Task } from '../schema/index.js';
-import type { ThinkingChain, VerificationResult, AgentModelInfo } from './types.js';
+import type { CoTReasoningChain, VerificationResult, AgentModelInfo } from './types.js';
 import { LLMThinkingVerifier } from './llm-verifier.js';
-import { hasThinkingCapability, extractModelName } from './model-capability.js';
+import { hasCoTReasoningCapability, extractModelName } from './model-capability.js';
 
 // ─── Tiered Audit Strategy ─────────────────────────────────
 
@@ -15,12 +15,12 @@ const STOPWORDS = ['the', 'is', 'a', 'an', 'and', 'or', 'but', '的', '是', '�
  * Simple rule-based verifier for low-risk tasks
  */
 class RuleBasedVerifier {
-  verify(task: Task, thinking: ThinkingChain): VerificationResult {
+  verify(task: Task, thinking: CoTReasoningChain): VerificationResult {
     const violations: string[] = [];
 
-    // Check 1: Thinking chain must exist
+    // Check 1: CoT reasoning chain must exist
     if (!thinking.reasoning || thinking.reasoning.length < MIN_REASONING_LENGTH) {
-      violations.push('Thinking chain too short');
+      violations.push('CoT reasoning chain too short');
     }
 
     // Check 2: Must have at least 2 steps
@@ -77,35 +77,40 @@ class RuleBasedVerifier {
 export class TieredAuditVerifier {
   private ruleVerifier: RuleBasedVerifier;
   private llmVerifier: LLMThinkingVerifier;
-  private requireThinkingCapability: boolean;
+  private requireCoTReasoningCapability: boolean;
 
   constructor(
     llmVerifier: LLMThinkingVerifier,
-    config: { requireThinkingCapability?: boolean } = {}
+    config: { requireCoTReasoningCapability?: boolean } = {}
   ) {
     this.ruleVerifier = new RuleBasedVerifier();
     this.llmVerifier = llmVerifier;
-    this.requireThinkingCapability = config.requireThinkingCapability ?? true;
+    this.requireCoTReasoningCapability = config.requireCoTReasoningCapability ?? true;
   }
 
   async verify(
     task: Task,
-    thinking: ThinkingChain,
+    thinking: CoTReasoningChain,
     modelInfo?: AgentModelInfo
   ): Promise<VerificationResult> {
-    // Check if model has thinking capability (REQUIRED)
-    if (this.requireThinkingCapability && modelInfo) {
+    // Check if model has CoT reasoning capability (REQUIRED)
+    if (this.requireCoTReasoningCapability && modelInfo) {
       const modelName = extractModelName(modelInfo.name || '');
-      const hasThinking = modelInfo.hasThinking ?? hasThinkingCapability(modelName);
+      const hasCoTReasoning = modelInfo.hasCoTReasoning ?? hasCoTReasoningCapability(modelName);
       
-      if (!hasThinking) {
-        // REJECT: Model does not support thinking
+      if (!hasCoTReasoning) {
+        // REJECT: Model does not support CoT reasoning
         return {
           passed: false,
-          violations: [`Model ${modelName} does not support thinking capability - connection rejected`],
+          violations: [
+            `Model ${modelName} does not support CoT reasoning capability - connection rejected`,
+            'This agent requires CoT (Chain-of-Thought) reasoning for task verification.',
+            'Please ensure your agent includes CoT reasoning capability in responses.',
+            'Hint: Add { "type": "cot_reasoning", "description": "..." } to your capabilities.'
+          ],
           confidence: 0,
           skipped: false,
-          skip_reason: 'Model lacks required thinking capability'
+          skip_reason: 'Model lacks required CoT reasoning capability'
         };
       }
     }

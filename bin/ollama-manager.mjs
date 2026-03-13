@@ -2,7 +2,7 @@
  * Ollama Manager - Auto-start Ollama and ensure model availability
  */
 
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -30,21 +30,40 @@ export async function isOllamaRunning() {
 export async function startOllama() {
   try {
     // Check if ollama is installed
-    await execAsync('which ollama');
+    try {
+      await execAsync('which ollama');
+    } catch {
+      console.error('[Ollama] Not installed. Install with: curl -fsSL https://ollama.com/install.sh | sh');
+      return false;
+    }
     
-    // Start ollama serve in background
-    exec('nohup ollama serve > /tmp/ollama.log 2>&1 &');
+    // Check if already running
+    if (await isOllamaRunning()) {
+      return true;
+    }
     
-    // Wait for service to be ready
-    for (let i = 0; i < 10; i++) {
+    console.log('[Ollama] Starting service...');
+    
+    // Start ollama serve in background with proper detachment
+    const child = spawn('ollama', ['serve'], {
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.unref();
+    
+    // Wait for service to be ready (up to 10 seconds)
+    for (let i = 0; i < 20; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       if (await isOllamaRunning()) {
+        console.log('[Ollama] Service started successfully');
         return true;
       }
     }
+    
+    console.error('[Ollama] Service failed to start within 10 seconds');
     return false;
   } catch (error) {
-    console.error('[Ollama] Not installed or failed to start:', error.message);
+    console.error('[Ollama] Failed to start:', error.message);
     return false;
   }
 }
@@ -73,7 +92,7 @@ export async function ensureModel(modelName = DEFAULT_MODEL) {
       return true;
     }
     
-    console.log(`[Ollama] Downloading model ${modelName}...`);
+    console.log(`[Ollama] Downloading model ${modelName}... (this may take 1-2 minutes)`);
     await execAsync(`ollama pull ${modelName}`, { timeout: 300000 }); // 5 min timeout
     console.log(`[Ollama] Model ${modelName} downloaded successfully`);
     return true;
@@ -93,13 +112,12 @@ export async function initializeOllama(modelName = DEFAULT_MODEL) {
   if (await isOllamaRunning()) {
     console.log('[Ollama] Service already running');
   } else {
-    console.log('[Ollama] Starting service...');
     const started = await startOllama();
     if (!started) {
       console.error('[Ollama] Failed to start service');
+      console.error('[Ollama] Please start manually: ollama serve');
       return false;
     }
-    console.log('[Ollama] Service started');
   }
   
   // Ensure model is available
@@ -107,6 +125,7 @@ export async function initializeOllama(modelName = DEFAULT_MODEL) {
   const hasModelReady = await ensureModel(modelName);
   if (!hasModelReady) {
     console.error(`[Ollama] Model ${modelName} not available`);
+    console.error(`[Ollama] Please download manually: ollama pull ${modelName}`);
     return false;
   }
   

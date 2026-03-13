@@ -1790,6 +1790,35 @@ async function cmdStart(port) {
       return { status: 'rejected', error: `Action "${action}" outside capability boundary`, capabilities: capTypes, proof: rp };
     }
 
+    // ── Requester Signature Verification (P2P Version 2) ──
+    if (payload._taskRequest && payload._taskSignature) {
+      try {
+        const taskRequest = payload._taskRequest;
+        const taskSignature = payload._taskSignature;
+        
+        // Verify signature
+        const verified = await verifyTaskSignature(
+          typeof taskRequest === 'string' ? JSON.parse(taskRequest) : taskRequest,
+          taskSignature,
+          message.from
+        );
+        
+        if (!verified) {
+          const reason = 'Invalid Requester signature (P2P Version 2)';
+          const rp = generateRejectionProof(message.from, action, reason, 'SIGNATURE_VERIFICATION_FAILED');
+          log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
+          return { status: 'rejected', error: reason, proof: rp };
+        }
+        
+        log({ event: 'requester_signature_verified', from: message.from, action, version: 2, timestamp: new Date().toISOString() });
+      } catch (e) {
+        const reason = `Signature verification error: ${e.message}`;
+        const rp = generateRejectionProof(message.from, action, reason, 'SIGNATURE_VERIFICATION_ERROR');
+        log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
+        return { status: 'rejected', error: reason, proof: rp };
+      }
+    }
+
     // ── Task Mode Check (P2P) ──
     const taskMode = currentPolicy.taskMode || 'auto';
     
@@ -2319,8 +2348,31 @@ async function cmdTask(target, taskJson) {
     const { confirm } = hsManager.processAck(ackMsg);
     await relaySend('/atel/v1/handshake', confirm);
 
-    // Step 3: send task
-    const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload, secretKey: id.secretKey });
+    // Step 3: create task request with signature (version 2)
+    const taskRequest = {
+      version: 2,
+      orderId: null,  // P2P mode has no order
+      taskId: generateTaskId(),
+      requesterDid: id.did,
+      executorDid: remoteDid,
+      capability: payload.action || 'general',
+      description: payload.payload?.prompt || payload.payload?.description || 'P2P task',
+      payload: payload.payload || {},
+      timestamp: new Date().toISOString()
+    };
+    
+    // Sign task request
+    const taskSignature = await signTaskRequest(taskRequest, id.secretKey);
+    
+    // Embed taskRequest and signature into payload
+    const enhancedPayload = {
+      ...payload,
+      _taskRequest: taskRequest,
+      _taskSignature: taskSignature
+    };
+    
+    // Step 4: send task
+    const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload: enhancedPayload, secretKey: id.secretKey });
     const relayAck = await relaySend('/atel/v1/task', msg);
 
     console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: 'relay', relay_ack: relayAck, note: 'Relay mode is async. Waiting for result (up to 120s)...' }));
@@ -2381,7 +2433,30 @@ async function cmdTask(target, taskJson) {
     sessions[remoteEndpoint] = { did: remoteDid };
     writeFileSync(sf, JSON.stringify(sessions, null, 2));
 
-    const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload, secretKey: id.secretKey });
+    // Create task request with signature (version 2)
+    const taskRequest = {
+      version: 2,
+      orderId: null,  // P2P mode has no order
+      taskId: generateTaskId(),
+      requesterDid: id.did,
+      executorDid: remoteDid,
+      capability: payload.action || 'general',
+      description: payload.payload?.prompt || payload.payload?.description || 'P2P task',
+      payload: payload.payload || {},
+      timestamp: new Date().toISOString()
+    };
+    
+    // Sign task request
+    const taskSignature = await signTaskRequest(taskRequest, id.secretKey);
+    
+    // Embed taskRequest and signature into payload
+    const enhancedPayload = {
+      ...payload,
+      _taskRequest: taskRequest,
+      _taskSignature: taskSignature
+    };
+
+    const msg = createMessage({ type: 'task', from: id.did, to: remoteDid, payload: enhancedPayload, secretKey: id.secretKey });
     const result = await client.sendTask(remoteEndpoint, msg, hsManager);
     console.log(JSON.stringify({ status: 'task_sent', remoteDid, via: remoteEndpoint, result }, null, 2));
 
@@ -3290,8 +3365,40 @@ async function cmdOfferClose(offerId) {
 
 async function cmdOfferBuy(offerId, desc) {
   if (!offerId) { console.error('Usage: atel offer-buy <offerId> [description]'); process.exit(1); }
-  const body = {};
-  if (desc) body.description = rawArgs.slice(rawArgs.indexOf(offerId) + 1).join(' ');
+  const id = requireIdentity();
+  
+  // Get offer details to extract executorDid and capability
+  const offerData = await signedFetch('GET', `/trade/v1/offer/${offerId}`);
+  if (!offerData || !offerData.executorDid) {
+    console.error('Error: Failed to fetch offer details');
+    process.exit(1);
+  }
+  
+  const description = desc ? rawArgs.slice(rawArgs.indexOf(offerId) + 1).join(' ') : `Purchased from offer ${offerId}`;
+  
+  // Create task request (version 2 with signature)
+  const taskRequest = {
+    version: 2,
+    orderId: null,  // Will be filled by Platform
+    taskId: generateTaskId(),
+    requesterDid: id.did,
+    executorDid: offerData.executorDid,
+    capability: offerData.capabilityType,
+    description: description,
+    payload: { description },
+    timestamp: new Date().toISOString()
+  };
+  
+  // Sign task request
+  const taskSignature = await signTaskRequest(taskRequest, id.secretKey);
+  
+  const body = {
+    description: description,
+    version: 2,
+    taskRequest: taskRequest,
+    taskSignature: taskSignature
+  };
+  
   const data = await signedFetch('POST', `/trade/v1/offer/${offerId}/buy`, body);
   console.log(JSON.stringify(data, null, 2));
 }

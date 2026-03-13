@@ -1,9 +1,9 @@
 // ─── Model Capability Detection ─────────────────────────────
 
 /**
- * Known models with thinking capability
+ * Known models with CoT reasoning capability
  */
-export const THINKING_CAPABLE_MODELS = [
+export const COT_REASONING_CAPABLE_MODELS = [
   // Anthropic Claude
   'claude-3-opus',
   'claude-3.5-sonnet',
@@ -24,7 +24,7 @@ export const THINKING_CAPABLE_MODELS = [
   'qwen-plus',
   'qwen-max',
   
-  // Local models (if configured for thinking)
+  // Local models (if configured for CoT reasoning)
   'qwen2.5:0.5b',
   'qwen2.5:1.5b',
   'qwen2.5:7b'
@@ -35,22 +35,22 @@ export const THINKING_CAPABLE_MODELS = [
  */
 export interface ModelCapability {
   name: string;
-  hasThinking: boolean;
+  hasCoTReasoning: boolean;
   hasToolCalling?: boolean;
   hasVision?: boolean;
   provider?: string;
 }
 
 /**
- * Check if a model supports thinking capability
+ * Check if a model supports CoT reasoning capability
  */
-export function hasThinkingCapability(modelName: string): boolean {
+export function hasCoTReasoningCapability(modelName: string): boolean {
   if (!modelName) return false;
   
   const normalized = modelName.toLowerCase().trim();
   
   // Check exact match
-  if (THINKING_CAPABLE_MODELS.some(m => normalized.includes(m.toLowerCase()))) {
+  if (COT_REASONING_CAPABLE_MODELS.some(m => normalized.includes(m.toLowerCase()))) {
     return true;
   }
   

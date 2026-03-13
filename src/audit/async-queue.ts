@@ -1,5 +1,5 @@
 import type { Task } from '../schema/index.js';
-import type { ThinkingChain, VerificationResult } from './types.js';
+import type { CoTReasoningChain, VerificationResult } from './types.js';
 import { LLMThinkingVerifier } from './llm-verifier.js';
 
 // ─── Async Audit Queue ──────────────────────────────────────
@@ -10,7 +10,7 @@ const DEFAULT_RETRY_DELAY = 5000;
 
 interface AuditTask {
   task: Task;
-  thinking: ThinkingChain;
+  thinking: CoTReasoningChain;
   timestamp: number;
   retries: number;
 }
@@ -47,7 +47,7 @@ export class AsyncAuditQueue {
    * Enqueue a task for async audit (non-blocking)
    * @throws Error if queue is full
    */
-  enqueue(task: Task, thinking: ThinkingChain): void {
+  enqueue(task: Task, thinking: CoTReasoningChain): void {
     if (this.queue.length >= this.config.maxQueueSize) {
       throw new Error(`Audit queue full (max: ${this.config.maxQueueSize})`);
     }

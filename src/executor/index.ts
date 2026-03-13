@@ -107,13 +107,12 @@ export class BuiltinExecutor {
     const enableAudit = config.enableThinkingAudit ?? true; // Default: enabled
     if (enableAudit) {
       const llmVerifier = new LLMThinkingVerifier({
-        endpoint: config.ollamaEndpoint || 'http://localhost:11434',
         modelName: config.ollamaModel || 'qwen2.5:0.5b',
       });
       this.auditVerifier = new TieredAuditVerifier(llmVerifier, {
-        requireThinkingCapability: config.requireThinkingCapability ?? false, // Don't reject non-thinking models
+        requireCoTReasoningCapability: config.requireThinkingCapability ?? false, // Don't reject non-thinking models
       });
-      this.log({ event: 'audit_verifier_initialized', ollama: config.ollamaEndpoint, model: config.ollamaModel });
+      this.log({ event: 'audit_verifier_initialized', model: config.ollamaModel });
     }
 
     // Setup express
@@ -227,7 +226,7 @@ export class BuiltinExecutor {
         // ── Extract thinking chain and trigger audit (same as main flow) ──
         const thinkingChain = this.extractThinkingChain(result);
         if (thinkingChain) {
-          this.log({ event: 'thinking_chain_extracted', taskId, steps: thinkingChain.steps.length });
+          this.log({ event: 'cot_chain_extracted', taskId, steps: thinkingChain.steps.length });
           
           // Async audit (non-blocking)
           if (this.auditVerifier) {
@@ -249,7 +248,7 @@ export class BuiltinExecutor {
                 const auditResult = await this.auditVerifier!.verify(task, thinkingChain, modelInfo);
                 
                 this.log({ 
-                  event: auditResult.passed ? 'thinking_audit_passed' : 'thinking_audit_failed',
+                  event: auditResult.passed ? 'cot_audit_passed' : 'cot_audit_failed',
                   taskId, 
                   passed: auditResult.passed,
                   violations: auditResult.violations,
@@ -257,7 +256,7 @@ export class BuiltinExecutor {
                 });
               } catch (error: unknown) {
                 const msg = error instanceof Error ? error.message : String(error);
-                this.log({ event: 'thinking_audit_error', taskId, error: msg });
+                this.log({ event: 'cot_audit_error', taskId, error: msg });
               }
             })();
           }
@@ -335,7 +334,7 @@ export class BuiltinExecutor {
       // ── Extract thinking chain from result ──
       const thinkingChain = this.extractThinkingChain(result);
       if (thinkingChain) {
-        this.log({ event: 'thinking_chain_extracted', taskId, steps: thinkingChain.steps.length });
+        this.log({ event: 'cot_chain_extracted', taskId, steps: thinkingChain.steps.length });
         
         // ── Async tiered audit (non-blocking) ──
         if (this.auditVerifier) {
@@ -372,7 +371,7 @@ export class BuiltinExecutor {
               const auditResult = await this.auditVerifier!.verify(task, thinkingChain, modelInfo);
               
               this.log({ 
-                event: auditResult.passed ? 'thinking_audit_passed' : 'thinking_audit_failed',
+                event: auditResult.passed ? 'cot_audit_passed' : 'cot_audit_failed',
                 taskId, 
                 passed: auditResult.passed,
                 violations: auditResult.violations,
@@ -380,7 +379,7 @@ export class BuiltinExecutor {
               });
             } catch (auditError: unknown) {
               const msg = auditError instanceof Error ? auditError.message : String(auditError);
-              this.log({ event: 'thinking_audit_error', taskId, error: msg });
+              this.log({ event: 'cot_audit_error', taskId, error: msg });
             }
           })();
         }
@@ -393,7 +392,7 @@ export class BuiltinExecutor {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 taskId,
-                tool: 'thinking_chain',
+                tool: 'cot_chain',
                 endpoint: `http://127.0.0.1:${this.config.port}/internal/openclaw_agent`,
               }),
             });
@@ -404,7 +403,7 @@ export class BuiltinExecutor {
           (result as Record<string, unknown>).thinking = thinkingChain;
         }
       } else {
-        this.log({ event: 'thinking_chain_missing', taskId, warning: 'Model did not produce thinking chain' });
+        this.log({ event: 'cot_chain_missing', taskId, warning: 'Model did not produce thinking chain' });
         
         // If thinking audit is enabled and required, reject tasks without thinking
         if (this.auditVerifier && this.config.requireThinkingCapability) {

@@ -1,6 +1,6 @@
 // ─── Audit Types ─────────────────────────────────────────────
 
-export interface ThinkingChain {
+export interface CoTReasoningChain {
   steps: string[];
   reasoning: string;
   conclusion: string;
@@ -17,15 +17,15 @@ export interface VerificationResult {
 
 export interface LLMAuditConfig {
   llm_model_path?: string;
-  llm_endpoint?: string;
+  // llm_endpoint removed: always use local Ollama
   strategy?: 'rule' | 'llm' | 'hybrid';
   fallback?: 'rule' | 'reject';
-  require_thinking_capability?: boolean;
+  require_cot_reasoning_capability?: boolean;
 }
 
 export interface AgentModelInfo {
   name?: string;
   provider?: string;
   capabilities?: string[];
-  hasThinking?: boolean;
+  hasCoTReasoning?: boolean;
 }

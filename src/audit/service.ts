@@ -1,5 +1,5 @@
 /**
- * Audit Service - Optional background thinking chain auditor
+ * Audit Service - Optional background CoT reasoning chain auditor
  * 
  * Design:
  * - Non-blocking: uses async queue, doesn't block main flow
@@ -9,7 +9,7 @@
  */
 
 import type { Task } from '../schema/index.js';
-import type { ThinkingChain, VerificationResult, AgentModelInfo, LLMAuditConfig } from './types.js';
+import type { CoTReasoningChain, VerificationResult, AgentModelInfo, LLMAuditConfig } from './types.js';
 import { TieredAuditVerifier } from './tiered-verifier.js';
 import { LLMThinkingVerifier } from './llm-verifier.js';
 import { AsyncAuditQueue } from './async-queue.js';
@@ -42,11 +42,10 @@ export class AuditService {
   constructor(config: AuditServiceConfig = {}) {
     this.config = {
       enabled: config.enabled ?? false,
-      llm_endpoint: config.llm_endpoint ?? 'http://localhost:11434',
       llm_model_path: config.llm_model_path ?? 'qwen2.5:0.5b',
       strategy: config.strategy ?? 'hybrid',
       fallback: config.fallback ?? 'rule',
-      require_thinking_capability: config.require_thinking_capability ?? true,
+      require_cot_reasoning_capability: config.require_cot_reasoning_capability ?? true,
       maxQueueSize: config.maxQueueSize ?? 1000,
       maxRetries: config.maxRetries ?? 3,
       retryDelay: config.retryDelay ?? 5000,
@@ -64,12 +63,11 @@ export class AuditService {
     // Create LLM verifier
     const llmVerifier = new LLMThinkingVerifier({
       modelName: this.config.llm_model_path,
-      endpoint: this.config.llm_endpoint,
     });
 
     // Create tiered verifier
     this.verifier = new TieredAuditVerifier(llmVerifier, {
-      requireThinkingCapability: this.config.require_thinking_capability,
+      requireCoTReasoningCapability: this.config.require_cot_reasoning_capability,
     });
 
     // Create async queue
@@ -100,7 +98,7 @@ export class AuditService {
    */
   async submitForAudit(
     task: Task,
-    thinking: ThinkingChain,
+    thinking: CoTReasoningChain,
     modelInfo?: AgentModelInfo
   ): Promise<void> {
     if (!this.config.enabled || !this.queue) {
@@ -121,7 +119,7 @@ export class AuditService {
    */
   async auditSync(
     task: Task,
-    thinking: ThinkingChain,
+    thinking: CoTReasoningChain,
     modelInfo?: AgentModelInfo
   ): Promise<VerificationResult> {
     if (!this.config.enabled || !this.verifier) {
