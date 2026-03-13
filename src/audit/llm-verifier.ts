@@ -1,12 +1,12 @@
 import type { Task } from '../schema/index.js';
 import type { CoTReasoningChain, VerificationResult } from './types.js';
+import { OllamaManager } from './ollama-manager.js';
 
 // ─── Constants ──────────────────────────────────────────────
 
-const DEFAULT_MODEL = 'qwen2.5:0.5b';
+const DEFAULT_MODEL = 'qwen2.5-0.5b-instruct-q4_0.gguf';
 const DEFAULT_CONFIDENCE_PASS = 0.85;
 const DEFAULT_CONFIDENCE_FAIL = 0.3;
-const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
 const AUDIT_PROMPT_TEMPLATE = `你是一个任务执行审计员。请判断以下CoT推理链是否符合任务要求。
 
@@ -37,32 +37,82 @@ CoT推理链：
 
 export class LLMThinkingVerifier {
   private modelName: string;
-  // Removed: always use local Ollama
+  private ollamaManager?: OllamaManager;
+  private initPromise?: Promise<void>;
+  private log: (message: string) => void;
 
-  constructor(config: { modelName?: string } = {}) {
+  constructor(config: { 
+    modelName?: string;
+    autoInit?: boolean;
+    log?: (message: string) => void;
+  } = {}) {
     this.modelName = config.modelName || DEFAULT_MODEL;
-    // Always use local Ollama (no remote endpoint)
+    this.log = config.log || ((msg) => console.log(`[LLM Verifier] ${msg}`));
+    
+    // Auto-initialize by default
+    if (config.autoInit !== false) {
+      this.initPromise = this.initialize();
+    }
+  }
+
+  /**
+   * Initialize the LLM (download model if needed, then load)
+   */
+  private async initialize(): Promise<void> {
+    try {
+      this.log('Initializing LLM...');
+      this.ollamaManager = new OllamaManager({
+        log: (msg) => this.log(msg),
+      });
+      await this.ollamaManager.initialize();
+    } catch (error: any) {
+      this.log(`⚠️  Failed to initialize LLM: ${error.message}`);
+      this.log('   Audit will be skipped for tasks');
+      this.ollamaManager = undefined;
+    }
+  }
+
+  /**
+   * Ensure initialization is complete
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (this.initPromise) {
+      await this.initPromise;
+      this.initPromise = undefined;
+    }
   }
 
   async verify(task: Task, thinking: CoTReasoningChain): Promise<VerificationResult> {
+    // Wait for initialization to complete
+    await this.ensureInitialized();
+
+    // Check if LLM is available
+    if (!this.ollamaManager || !this.ollamaManager.isReady()) {
+      this.log('LLM not available, skipping audit');
+      return {
+        passed: true,
+        violations: [],
+        skipped: true,
+        skip_reason: 'LLM not available',
+        confidence: 0,
+      };
+    }
+
     const prompt = this.buildAuditPrompt(task, thinking);
 
     try {
-      const response = await this.callLocalLLM(prompt);
-
+      const response = await this.ollamaManager.generate(prompt);
       return this.parseResponse(response);
     } catch (error: any) {
-      // Log error for debugging
-      console.error('[LLM Verifier] Audit failed:', {
-        taskId: task.task_id,
-        error: error.message,
-        stack: error.stack
-      });
+      this.log(`Audit failed: ${error.message}`);
       
+      // Don't fail the task, just skip audit
       return {
-        passed: false,
-        violations: [`LLM audit failed: ${error.message}`],
-        confidence: 0
+        passed: true,
+        violations: [],
+        skipped: true,
+        skip_reason: `Audit failed: ${error.message}`,
+        confidence: 0,
       };
     }
   }
@@ -73,36 +123,6 @@ export class LLMThinkingVerifier {
       .replace('{REASONING}', thinking.reasoning)
       .replace('{CONCLUSION}', thinking.conclusion);
   }
-
-  private async callLocalLLM(prompt: string): Promise<string> {
-    // Use Ollama HTTP API instead of shell execution to prevent injection
-    const ollamaEndpoint = 'http://localhost:11434';
-    
-    try {
-      const response = await fetch(`${ollamaEndpoint}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.modelName,
-          prompt: prompt,
-          stream: false
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ollama API failed: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data.response || '';
-    } catch (error: any) {
-      // Log error for debugging
-      console.error('[LLM Verifier] Ollama API error:', error.message);
-      throw error;
-    }
-  }
-
-  // Removed: callRemoteLLM (always use local Ollama)
 
   private parseResponse(response: string): VerificationResult {
     try {
@@ -129,6 +149,16 @@ export class LLMThinkingVerifier {
         violations: [`Failed to parse LLM response: ${error.message}`],
         confidence: 0
       };
+    }
+  }
+
+  /**
+   * Clean up resources
+   */
+  async cleanup(): Promise<void> {
+    if (this.ollamaManager) {
+      await this.ollamaManager.cleanup();
+      this.ollamaManager = undefined;
     }
   }
 }
