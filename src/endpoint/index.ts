@@ -248,34 +248,14 @@ export class AgentEndpoint {
             message as ATELMessage<HandshakeInitPayload>,
             this.config.wallets,
           );
-          // Add requirements to inform remote agent about CoT reasoning requirement
-          const ackWithRequirements = {
-            ...ack,
-            requirements: {
-              cot_reasoning: {
-                required: true,
-                reason: 'This agent uses CoT reasoning audit for task verification',
-              },
-            },
-          };
-          res.json(ackWithRequirements);
+          res.json(ack);
         } else if (message.type === 'handshake_confirm') {
           const initiatorPubKey = parseDID(message.from);
           const session = this.handshakeManager.processConfirm(
             message as ATELMessage<HandshakeConfirmPayload>,
             initiatorPubKey,
           );
-          res.json({ 
-            status: 'ok', 
-            sessionId: session.sessionId, 
-            encrypted: session.encrypted,
-            requirements: {
-              cot_reasoning: {
-                required: true,
-                reason: 'This agent uses CoT reasoning audit for task verification',
-              },
-            },
-          });
+          res.json({ status: 'ok', sessionId: session.sessionId, encrypted: session.encrypted });
         } else {
           res.status(400).json({ error: `Unexpected handshake message type: ${message.type}` });
         }
