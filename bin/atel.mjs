@@ -309,15 +309,16 @@ async function verifyTaskSignature(taskRequest, signature, publicKeyHex) {
   const { default: nacl } = await import('tweetnacl');
   
   // Canonical JSON for verification
+  // IMPORTANT: Keys must be in alphabetical order to match signTaskRequest
   const signable = JSON.stringify({
-    version: taskRequest.version,
-    taskId: taskRequest.taskId,
-    requesterDid: taskRequest.requesterDid,
-    executorDid: taskRequest.executorDid,
     capability: taskRequest.capability,
     description: taskRequest.description,
+    executorDid: taskRequest.executorDid,
     payload: taskRequest.payload,
-    timestamp: taskRequest.timestamp
+    requesterDid: taskRequest.requesterDid,
+    taskId: taskRequest.taskId,
+    timestamp: taskRequest.timestamp,
+    version: taskRequest.version
   });
   
   try {
@@ -1796,11 +1797,14 @@ async function cmdStart(port) {
         const taskRequest = payload._taskRequest;
         const taskSignature = payload._taskSignature;
         
+        // Extract public key from DID (did:atel:ed25519:PUBLIC_KEY)
+        const publicKey = message.from.split(':')[3];
+        
         // Verify signature
         const verified = await verifyTaskSignature(
           typeof taskRequest === 'string' ? JSON.parse(taskRequest) : taskRequest,
           taskSignature,
-          message.from
+          publicKey
         );
         
         if (!verified) {
