@@ -1790,35 +1790,6 @@ async function cmdStart(port) {
       return { status: 'rejected', error: `Action "${action}" outside capability boundary`, capabilities: capTypes, proof: rp };
     }
 
-    // ── Requester Signature Verification (P2P Version 2) ──
-    if (payload._taskRequest && payload._taskSignature) {
-      try {
-        const taskRequest = payload._taskRequest;
-        const taskSignature = payload._taskSignature;
-        
-        // Verify signature
-        const verified = await verifyTaskSignature(
-          typeof taskRequest === 'string' ? JSON.parse(taskRequest) : taskRequest,
-          taskSignature,
-          message.from
-        );
-        
-        if (!verified) {
-          const reason = 'Invalid Requester signature (P2P Version 2)';
-          const rp = generateRejectionProof(message.from, action, reason, 'SIGNATURE_VERIFICATION_FAILED');
-          log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
-          return { status: 'rejected', error: reason, proof: rp };
-        }
-        
-        log({ event: 'requester_signature_verified', from: message.from, action, version: 2, timestamp: new Date().toISOString() });
-      } catch (e) {
-        const reason = `Signature verification error: ${e.message}`;
-        const rp = generateRejectionProof(message.from, action, reason, 'SIGNATURE_VERIFICATION_ERROR');
-        log({ event: 'task_rejected', from: message.from, action, reason, timestamp: new Date().toISOString() });
-        return { status: 'rejected', error: reason, proof: rp };
-      }
-    }
-
     // ── Task Mode Check (P2P) ──
     const taskMode = currentPolicy.taskMode || 'auto';
     
