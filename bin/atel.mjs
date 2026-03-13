@@ -2800,8 +2800,8 @@ async function signedFetch(method, path, payload = {}) {
   const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
   const body = JSON.stringify({ did: id.did, payload, timestamp: ts, signature: sig });
   // Always use POST for signed requests (DIDAuth reads body, GET cannot have body)
-  const res = await fetch(`${PLATFORM_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  const data = await res.json();
+  console.error("DEBUG URL:", `${PLATFORM_URL}${path}`); const res = await fetch(`${PLATFORM_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -2968,7 +2968,7 @@ async function cmdOrder(executorDid, capType, price) {
 async function cmdOrderInfo(orderId) {
   if (!orderId) { console.error('Usage: atel order-info <orderId>'); process.exit(1); }
   const res = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}`);
-  const data = await res.json();
+  const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   console.log(JSON.stringify(data, null, 2));
 }
@@ -3261,7 +3261,7 @@ async function cmdDisputes() {
 async function cmdDisputeInfo(disputeId) {
   if (!disputeId) { console.error('Usage: atel dispute-info <disputeId>'); process.exit(1); }
   const res = await fetch(`${PLATFORM_URL}/dispute/v1/${disputeId}`);
-  const data = await res.json();
+  const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   console.log(JSON.stringify(data, null, 2));
 }
@@ -3276,7 +3276,7 @@ async function cmdCertApply(level) {
 async function cmdCertStatus(did) {
   const targetDid = did || requireIdentity().did;
   const res = await fetch(`${PLATFORM_URL}/cert/v1/status/${encodeURIComponent(targetDid)}`);
-  const data = await res.json();
+  const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   console.log(JSON.stringify(data, null, 2));
 }
@@ -3297,7 +3297,7 @@ async function cmdBoost(tier, weeks) {
 async function cmdBoostStatus(did) {
   const targetDid = did || requireIdentity().did;
   const res = await fetch(`${PLATFORM_URL}/boost/v1/status/${encodeURIComponent(targetDid)}`);
-  const data = await res.json();
+  const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   console.log(JSON.stringify(data, null, 2));
 }
@@ -3367,10 +3367,15 @@ async function cmdOfferBuy(offerId, desc) {
   if (!offerId) { console.error('Usage: atel offer-buy <offerId> [description]'); process.exit(1); }
   const id = requireIdentity();
   
-  // Get offer details to extract executorDid and capability
-  const offerData = await signedFetch('GET', `/trade/v1/offer/${offerId}`);
+  // Get offer details to extract executorDid and capability (public API, no auth needed)
+  const offerRes = await fetch(`${PLATFORM_URL}/trade/v1/offer/${offerId}`);
+  if (!offerRes.ok) {
+    console.error(`Error: Failed to fetch offer details (HTTP ${offerRes.status})`);
+    process.exit(1);
+  }
+  const offerData = await offerRes.json();
   if (!offerData || !offerData.executorDid) {
-    console.error('Error: Failed to fetch offer details');
+    console.error('Error: Invalid offer data');
     process.exit(1);
   }
   
