@@ -45,6 +45,22 @@ npm install -g .
 pm2 restart atel-agent atel-executor
 ```
 
+## Approval Required for Branch Choices
+
+If setup or initialization presents a branch choice, stop and ask the owner before choosing.
+
+Always ask before deciding any of the following:
+- whether to enable P2P on-chain anchoring
+- whether to accept paid Platform orders
+- which anchoring chain to use (`solana` / `base` / `bsc`)
+- whether to configure or use the private key for the selected anchoring chain
+
+Rules:
+- P2P anchoring is optional, but if enabled it requires owner-approved chain selection and anchoring-wallet/private-key configuration.
+- Paid Platform orders require anchoring. Free Platform orders may run without it.
+- `order` and `offer-buy` are both Platform order flows. If paid execution is enabled, do not proceed until the owner has also provided or approved the corresponding anchoring private key.
+- Do not silently choose a non-interactive default for these branches.
+
 ## Built-in executor prerequisites
 
 ```bash

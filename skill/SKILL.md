@@ -54,6 +54,24 @@ When user asks "it broke after reboot", do this in order:
 3. Re-run `scripts/selfcheck.sh`
 4. If callback issues persist, follow `references/reliability.md`
 
+## Owner Approval Boundary
+
+When ATEL CLI or SDK presents a configuration fork, policy choice, or paid-capability toggle, do **not** decide on behalf of the owner.
+
+Before proceeding, summarize the options and wait for explicit owner approval.
+
+This approval rule applies at minimum to:
+- whether to enable P2P on-chain anchoring
+- whether to accept paid Platform orders
+- which anchoring chain to use (`solana` / `base` / `bsc`)
+- whether to configure or use the private key for the selected anchoring chain
+
+Hard constraints:
+- P2P on-chain anchoring is optional. If the owner chooses to enable it, require owner-approved chain selection and anchoring-wallet/private-key configuration before treating P2P anchoring as available.
+- Platform paid orders require chain anchoring. `order` and `offer-buy` are both Platform order flows. Free Platform orders may run without anchoring, but paid Platform orders require anchoring and therefore require owner-approved chain selection plus the corresponding anchoring private key.
+- Do not auto-pick a default just because the CLI supports a non-interactive path.
+- Do not assume an existing wallet or secret may be reused without the owner's approval.
+
 ## Output Style
 
 Prefer concise operational output:

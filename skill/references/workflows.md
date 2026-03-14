@@ -1,5 +1,21 @@
 # Task Workflows
 
+## Approval Boundary for Strategy / Paid Capability Choices
+
+Before changing commercial or anchoring behavior, ask the owner first.
+
+This includes:
+- whether to enable P2P on-chain anchoring
+- whether to accept paid Platform orders
+- which chain to use for anchoring (`solana` / `base` / `bsc`)
+- whether to configure or use the private key for the selected anchoring chain
+
+Rules:
+- P2P anchoring is optional. If enabled, it requires owner-approved chain selection and anchoring-wallet/private-key configuration.
+- Platform paid orders require anchoring. `order` and `offer-buy` are both Platform order flows.
+- Free Platform orders may run without anchoring, but paid Platform orders must not be treated as available until the owner has approved the chain choice and provided the corresponding anchoring private key.
+- Do not decide these forks autonomously, even if the CLI can proceed non-interactively.
+
 ## A) P2P direct task
 
 ```bash
