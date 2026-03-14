@@ -4146,13 +4146,26 @@ async function cmdComplete(orderId, taskId) {
   const payload = {};
   if (taskId) payload.taskId = taskId;
 
-  // Fetch order info for context
+  // Fetch order info for context (raw GET; order-info endpoint is public GET, not DIDAuth POST)
   let requesterDid = 'unknown';
   let orderInfo = null;
   try {
-    orderInfo = await signedFetch('GET', `/trade/v1/order/${orderId}`);
-    requesterDid = orderInfo.requesterDid || 'unknown';
+    const res = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}`, { signal: AbortSignal.timeout(10000) });
+    const text = await res.text();
+    if (res.ok) {
+      orderInfo = JSON.parse(text);
+      requesterDid = orderInfo.requesterDid || 'unknown';
+    } else {
+      throw new Error(text || `HTTP ${res.status}`);
+    }
   } catch (e) { console.error(`[complete] Warning: could not fetch order info: ${e.message}`); }
+
+  // Idempotency: if order is already completed or beyond, don't submit duplicate complete
+  if (orderInfo && ['completed', 'confirmed', 'settled'].includes(String(orderInfo.status || '').toLowerCase())) {
+    console.error(`[complete] Order ${orderId} is already ${orderInfo.status}; skipping duplicate complete.`);
+    console.log(JSON.stringify(orderInfo, null, 2));
+    return;
+  }
 
   // ========== Verify Requester Signature (version >= 2) ==========
   if (orderInfo && orderInfo.version >= 2) {
@@ -4356,8 +4369,28 @@ async function cmdComplete(orderId, taskId) {
   if (anchorTx) payload.anchorTx = anchorTx;
   if (anchorChain) payload.chain = anchorChain;
 
-  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/complete`, payload);
-  console.log(JSON.stringify(data, null, 2));
+  try {
+    const data = await signedFetch('POST', `/trade/v1/order/${orderId}/complete`, payload);
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  } catch (e) {
+    const msg = e?.message || '';
+    if (msg.includes('order must be executing')) {
+      try {
+        const res = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}`, { signal: AbortSignal.timeout(10000) });
+        const text = await res.text();
+        if (res.ok) {
+          const latest = JSON.parse(text);
+          if (['completed', 'confirmed', 'settled'].includes(String(latest.status || '').toLowerCase())) {
+            console.error(`[complete] Duplicate complete detected; order is already ${latest.status}.`);
+            console.log(JSON.stringify(latest, null, 2));
+            return;
+          }
+        }
+      } catch {}
+    }
+    throw e;
+  }
 }
 
 async function cmdConfirm(orderId) {
