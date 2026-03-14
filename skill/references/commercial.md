@@ -85,7 +85,7 @@ atel offer-buy <offerId> "Please research quantum computing"
 atel offer-close <offerId>
 ```
 
-Offer API routes (all POST, DID-signed):
+Offer API routes (public GET for listing/details, DID-signed POST for mutations):
 - `POST /trade/v1/offer` — Create offer
 - `GET /trade/v1/offers` — List offers (public)
 - `GET /trade/v1/offer/:offerId` — Get offer details (public)
