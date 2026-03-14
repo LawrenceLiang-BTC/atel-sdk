@@ -83,7 +83,44 @@ const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent:
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function ensureDir() { if (!existsSync(ATEL_DIR)) mkdirSync(ATEL_DIR, { recursive: true }); }
-function log(event) { ensureDir(); appendFileSync(INBOX_FILE, JSON.stringify(event) + '\n'); console.log(JSON.stringify(event)); }
+
+// Safe log with EPIPE protection
+function log(event) { 
+  ensureDir(); 
+  appendFileSync(INBOX_FILE, JSON.stringify(event) + '\n'); 
+  try {
+    console.log(JSON.stringify(event));
+  } catch (e) {
+    if (e.code === 'EPIPE') {
+      // Silently ignore EPIPE, file logging still works
+      return;
+    }
+    throw e;
+  }
+}
+
+// Auto-discover OpenClaw Gateway URL
+function getGatewayUrl() {
+  // Priority: environment variable > openclaw.json > default
+  if (process.env.OPENCLAW_GATEWAY_URL) {
+    return process.env.OPENCLAW_GATEWAY_URL;
+  }
+  
+  try {
+    const home = process.env.HOME || '';
+    const configPath = join(home, '.openclaw/openclaw.json');
+    if (existsSync(configPath)) {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const port = config.gateway?.port || 18789;
+      const bind = config.gateway?.bind || '127.0.0.1';
+      return `http://${bind}:${port}`;
+    }
+  } catch {
+    // Ignore errors, fall back to default
+  }
+  
+  return 'http://127.0.0.1:18789';
+}
 
 function saveIdentity(id) { ensureDir(); writeFileSync(IDENTITY_FILE, JSON.stringify({ agent_id: id.agent_id, did: id.did, publicKey: Buffer.from(id.publicKey).toString('hex'), secretKey: Buffer.from(id.secretKey).toString('hex') }, null, 2)); }
 function loadIdentity() { if (!existsSync(IDENTITY_FILE)) return null; const d = JSON.parse(readFileSync(IDENTITY_FILE, 'utf-8')); return new AgentIdentity({ agent_id: d.agent_id, publicKey: Uint8Array.from(Buffer.from(d.publicKey, 'hex')), secretKey: Uint8Array.from(Buffer.from(d.secretKey, 'hex')) }); }
@@ -1091,7 +1128,7 @@ async function cmdStart(port) {
       builtinExecutor = new BuiltinExecutor({
         port: executorPort,
         callbackUrl: `http://127.0.0.1:${p}/atel/v1/result`,
-        gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789',
+        gatewayUrl: getGatewayUrl(),
         contextPath: join(ATEL_DIR, 'agent-context.md'),
         log,
       });
@@ -2098,16 +2135,42 @@ async function cmdStart(port) {
 
   // Global error handlers
   process.on('uncaughtException', (err) => {
-    log({ event: 'uncaught_exception', error: err.message, stack: err.stack });
-    console.error('[FATAL] Uncaught exception:', err);
-    // Don't exit immediately, give time to log
+    // Avoid recursive EPIPE
+    if (err.code === 'EPIPE') {
+      // Silently ignore EPIPE in stdout/stderr
+      return;
+    }
+    
+    // Only write to file, avoid console (prevent EPIPE recursion)
+    try {
+      ensureDir();
+      appendFileSync(INBOX_FILE, JSON.stringify({
+        event: 'uncaught_exception',
+        error: err.message,
+        stack: err.stack,
+        timestamp: new Date().toISOString()
+      }) + '\n');
+    } catch {
+      // If even file writing fails, give up
+    }
+    
     setTimeout(() => process.exit(1), 1000);
   });
 
   process.on('unhandledRejection', (reason, promise) => {
-    log({ event: 'unhandled_rejection', reason: String(reason), promise: String(promise) });
-    console.error('[FATAL] Unhandled rejection:', reason);
-    // Don't exit immediately, give time to log
+    // Only write to file, avoid console (prevent EPIPE recursion)
+    try {
+      ensureDir();
+      appendFileSync(INBOX_FILE, JSON.stringify({
+        event: 'unhandled_rejection',
+        reason: String(reason),
+        promise: String(promise),
+        timestamp: new Date().toISOString()
+      }) + '\n');
+    } catch {
+      // If even file writing fails, give up
+    }
+    
     setTimeout(() => process.exit(1), 1000);
   });
 }
