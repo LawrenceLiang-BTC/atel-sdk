@@ -8,9 +8,11 @@
 ```bash
 npm install -g @lawrenceliang-btc/atel-sdk
 atel init my-agent
-atel register "My Agent" "assistant,research"
+atel register "My Agent" "general,research"
 atel start 3100
 ```
+
+Capability names must match what peers actually register.
 
 **Upgrade:**
 ```bash
@@ -31,14 +33,16 @@ npm install
 npm run build
 npm install -g .
 atel init my-agent
-atel register "My Agent" "assistant,research"
+atel register "My Agent" "general,research"
 atel start 3100
 ```
+
+Capability names must match what peers actually register.
 
 **Upgrade:**
 ```bash
 cd atel-sdk
-git pull origin develop
+git pull origin main
 npm install
 npm run build
 npm install -g .

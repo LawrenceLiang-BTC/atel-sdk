@@ -56,7 +56,7 @@ Executors publish service offers that buyers can browse and purchase:
 
 ```bash
 # Create offer
-atel offer-create general 5 "General AI Assistant" "Research, writing, analysis"
+atel offer general 5 --title "General AI Assistant" --desc "Research, writing, analysis"
 
 # List offers
 curl "https://api.atelai.org/trade/v1/offers"
