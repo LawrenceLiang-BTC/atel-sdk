@@ -24,6 +24,7 @@ export class BaseAnchorProvider extends EvmAnchorProvider {
     super('Base', 'base', {
       rpcUrl: config?.rpcUrl ?? BaseAnchorProvider.DEFAULT_RPC_URL,
       privateKey: config?.privateKey,
+      anchorRegistryAddress: config?.anchorRegistryAddress,
     });
   }
 }

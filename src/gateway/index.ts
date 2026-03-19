@@ -259,11 +259,13 @@ export class ToolGateway {
   private callCount: number = 0;
   private readonly trace?: ExecutionTrace;
   private readonly defaultRiskLevel: RiskLevel;
+  /** Optional independent gateway identity for signing TOOL_CALL/TOOL_RESULT events */
+  private readonly gatewayIdentity?: { did: string; sign: (data: Uint8Array) => Uint8Array; publicKey: Uint8Array };
 
   /**
    * @param policyEngine - A GatewayPolicyEngine or PolicyEngine instance.
    *   If a PolicyEngine is provided, it is automatically adapted.
-   * @param options - Optional configuration (trace integration, etc.).
+   * @param options - Optional configuration (trace integration, gateway identity, etc.).
    */
   constructor(policyEngine: GatewayPolicyEngine | PolicyEngine, options?: ToolGatewayOptions) {
     // Duck-type check: PolicyEngine has `getToken` and `recordCall` methods
@@ -274,6 +276,7 @@ export class ToolGateway {
     }
     this.trace = options?.trace;
     this.defaultRiskLevel = options?.defaultRiskLevel ?? 'low';
+    this.gatewayIdentity = (options as any)?.gatewayIdentity;
   }
 
   /**
@@ -343,12 +346,16 @@ export class ToolGateway {
     let output: unknown;
     let status: 'ok' | 'error' | 'timeout' = 'ok';
 
-    // Auto-trace: record TOOL_CALL before execution
+    // Auto-trace: record TOOL_CALL before execution (with optional gateway signature)
     if (this.trace) {
-      this.trace.append('TOOL_CALL', {
-        tool,
-        input_hash: inputHash,
-      });
+      const callData: Record<string, unknown> = { tool, input_hash: inputHash };
+      if (this.gatewayIdentity) {
+        const dataToSign = JSON.stringify({ tool, input_hash: inputHash, ts: Date.now() });
+        const sig = this.gatewayIdentity.sign(new TextEncoder().encode(dataToSign));
+        callData.gateway_did = this.gatewayIdentity.did;
+        callData.gateway_sig = Buffer.from(sig).toString('base64');
+      }
+      this.trace.append('TOOL_CALL', callData);
     }
 
     try {
@@ -363,14 +370,16 @@ export class ToolGateway {
     const duration_ms = Math.round(performance.now() - start);
     const outputHash = computeHash(output);
 
-    // Auto-trace: record TOOL_RESULT after execution
+    // Auto-trace: record TOOL_RESULT after execution (with optional gateway signature)
     if (this.trace) {
-      this.trace.append('TOOL_RESULT', {
-        tool,
-        output_hash: outputHash,
-        status,
-        duration_ms,
-      });
+      const resultData: Record<string, unknown> = { tool, output_hash: outputHash, status, duration_ms };
+      if (this.gatewayIdentity) {
+        const dataToSign = JSON.stringify({ tool, output_hash: outputHash, status, duration_ms, ts: Date.now() });
+        const sig = this.gatewayIdentity.sign(new TextEncoder().encode(dataToSign));
+        resultData.gateway_did = this.gatewayIdentity.did;
+        resultData.gateway_sig = Buffer.from(sig).toString('base64');
+      }
+      this.trace.append('TOOL_RESULT', resultData);
     }
 
     const entry: CallLogEntry = {

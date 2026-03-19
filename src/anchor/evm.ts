@@ -27,6 +27,11 @@ export interface EvmAnchorConfig {
    * ⚠️ SECURITY: Keep this value secret. Load from env vars or a vault.
    */
   privateKey?: string;
+  /**
+   * AnchorRegistry contract address. If set, anchoring uses the contract
+   * instead of the legacy self-transfer memo approach.
+   */
+  anchorRegistryAddress?: string;
 }
 
 /**
@@ -52,6 +57,14 @@ export interface EvmAnchorMemoV2 {
  *
  * Subclasses only need to supply `name`, `chain`, and a default RPC URL.
  */
+/** AnchorRegistry contract ABI (only the functions we need) */
+const ANCHOR_REGISTRY_ABI = [
+  'function anchor(bytes32 orderId, bytes32 proofHash) external',
+  'function verify(bytes32 orderId, bytes32 proofHash, address executor) external view returns (bool)',
+  'function exists(bytes32 orderId) external view returns (bool)',
+  'function getAnchor(bytes32 orderId) external view returns (bytes32 proofHash, address executor, uint256 timestamp, bool _exists)',
+];
+
 export class EvmAnchorProvider implements AnchorProvider {
   readonly name: string;
   readonly chain: string;
@@ -60,6 +73,8 @@ export class EvmAnchorProvider implements AnchorProvider {
   protected readonly provider: ethers.JsonRpcProvider;
   /** Wallet for signing (undefined when no private key is supplied) */
   protected readonly wallet?: ethers.Wallet;
+  /** AnchorRegistry contract address (if set, uses contract instead of memo) */
+  protected readonly anchorRegistryAddress?: string;
 
   /**
    * @param name - Human-readable provider name.
@@ -70,6 +85,7 @@ export class EvmAnchorProvider implements AnchorProvider {
     this.name = name;
     this.chain = chain;
     this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+    this.anchorRegistryAddress = config.anchorRegistryAddress;
 
     if (config.privateKey) {
       // ⚠️ SECURITY: The wallet holds the private key in memory.
@@ -137,14 +153,28 @@ export class EvmAnchorProvider implements AnchorProvider {
       throw new Error(`${this.name}: Cannot anchor without a private key`);
     }
 
-    const data = EvmAnchorProvider.encodeData(hash, metadata as any);
-
     try {
-      const tx = await this.wallet.sendTransaction({
-        to: this.wallet.address,
-        value: 0n,
-        data,
-      });
+      let tx;
+
+      if (this.anchorRegistryAddress) {
+        // ── Contract mode: call AnchorRegistry.anchor(orderId, proofHash) ──
+        const contract = new ethers.Contract(this.anchorRegistryAddress, ANCHOR_REGISTRY_ABI, this.wallet);
+        const meta = metadata as any;
+        const taskId = meta?.taskId || meta?.orderId || hash;
+        const orderIdHash = ethers.keccak256(ethers.toUtf8Bytes(taskId));
+        const proofHashBytes = hash.startsWith('0x')
+          ? hash
+          : '0x' + hash.padStart(64, '0');
+        tx = await contract.anchor(orderIdHash, proofHashBytes);
+      } else {
+        // ── Legacy mode: self-transfer with memo data ──
+        const data = EvmAnchorProvider.encodeData(hash, metadata as any);
+        tx = await this.wallet.sendTransaction({
+          to: this.wallet.address,
+          value: 0n,
+          data,
+        });
+      }
 
       const receipt = await tx.wait();
       if (!receipt) {
@@ -157,7 +187,11 @@ export class EvmAnchorProvider implements AnchorProvider {
         chain: this.chain as ChainId,
         timestamp: Date.now(),
         blockNumber: receipt.blockNumber,
-        metadata,
+        metadata: {
+          ...metadata,
+          mode: this.anchorRegistryAddress ? 'contract' : 'memo',
+          contractAddress: this.anchorRegistryAddress || undefined,
+        },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -165,63 +199,71 @@ export class EvmAnchorProvider implements AnchorProvider {
     }
   }
 
-  /** @inheritdoc */
-  async verify(hash: string, txHash: string): Promise<AnchorVerification> {
+  /**
+   * Verify an anchor on-chain.
+   * @param hash - The proof hash (trace_root)
+   * @param txHash - Transaction hash (for legacy mode) or any identifier
+   * @param executor - Executor wallet address (for contract strong verify)
+   * @param orderId - Order ID string (for contract mode, e.g. "ord-xxx")
+   *
+   * Strategy: if anchorRegistryAddress is set AND orderId is provided,
+   * try contract verification first. If contract returns false or no orderId,
+   * fall back to legacy tx data parsing.
+   */
+  async verify(hash: string, txHash: string, executor?: string, orderId?: string): Promise<AnchorVerification> {
+    // ── Contract mode: verify via AnchorRegistry ──
+    if (this.anchorRegistryAddress && orderId) {
+      try {
+        const contract = new ethers.Contract(this.anchorRegistryAddress, ANCHOR_REGISTRY_ABI, this.provider);
+        const orderIdHash = ethers.keccak256(ethers.toUtf8Bytes(orderId));
+        const proofHashBytes = hash.startsWith('0x') ? hash : '0x' + hash.padStart(64, '0');
+
+        if (executor) {
+          const valid = await contract.verify(orderIdHash, proofHashBytes, executor);
+          if (valid) {
+            return { valid: true, hash, txHash, chain: this.chain, detail: 'Contract verify passed (strong: proofHash + executor)' };
+          }
+          // Contract verify failed — fall through to legacy
+        } else {
+          const exists = await contract.exists(orderIdHash);
+          if (exists) {
+            return { valid: true, hash, txHash, chain: this.chain, detail: 'Anchor exists in contract' };
+          }
+        }
+      } catch {
+        // Contract call failed — fall through to legacy
+      }
+    }
+
+    // ── Legacy mode: parse transaction data ──
     try {
       const tx = await this.provider.getTransaction(txHash);
       if (!tx) {
-        return {
-          valid: false,
-          hash,
-          txHash,
-          chain: this.chain,
-          detail: 'Transaction not found',
-        };
+        return { valid: false, hash, txHash, chain: this.chain, detail: 'Transaction not found' };
       }
 
       const decoded = EvmAnchorProvider.decodeData(tx.data);
       if (decoded === null) {
-        return {
-          valid: false,
-          hash,
-          txHash,
-          chain: this.chain,
-          detail: 'Transaction data does not contain a valid anchor',
-        };
+        return { valid: false, hash, txHash, chain: this.chain, detail: 'Transaction data does not contain a valid anchor' };
       }
 
       const valid = decoded === hash;
 
-      // Try to get block timestamp
       let blockTimestamp: number | undefined;
       if (tx.blockNumber) {
         try {
           const block = await this.provider.getBlock(tx.blockNumber);
           blockTimestamp = block ? block.timestamp * 1000 : undefined;
-        } catch {
-          // Non-critical — skip timestamp
-        }
+        } catch { /* skip */ }
       }
 
       return {
-        valid,
-        hash,
-        txHash,
-        chain: this.chain,
-        blockTimestamp,
-        detail: valid
-          ? 'Hash matches on-chain data'
-          : `Hash mismatch: expected "${hash}", found "${decoded}"`,
+        valid, hash, txHash, chain: this.chain, blockTimestamp,
+        detail: valid ? 'Hash matches on-chain data' : `Hash mismatch: expected "${hash}", found "${decoded}"`,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return {
-        valid: false,
-        hash,
-        txHash,
-        chain: this.chain,
-        detail: `Verification error: ${message}`,
-      };
+      return { valid: false, hash, txHash, chain: this.chain, detail: `Verification error: ${message}` };
     }
   }
 
