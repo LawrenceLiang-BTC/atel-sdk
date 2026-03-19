@@ -4170,14 +4170,33 @@ async function cmdDeposit(amount, channel) {
 }
 
 async function cmdWithdraw(amount, channel, address) {
-  if (!amount || isNaN(amount)) { console.error('Usage: atel withdraw <amount> [channel] [address]'); process.exit(1); }
-  if (channel && channel.startsWith('crypto_') && !address) {
-    console.error('Error: recipient wallet address required for crypto withdrawal');
-    console.error('Usage: atel withdraw <amount> crypto_base <your_wallet_address>');
+  if (!amount || isNaN(amount) || !address) {
+    console.error('Usage: atel withdraw <amount> <your_wallet_address> [chain]');
+    console.error('  amount:  USDC amount to withdraw');
+    console.error('  address: your external wallet address');
+    console.error('  chain:   base (default) or bsc');
     process.exit(1);
   }
-  const data = await signedFetch('POST', '/account/v1/withdraw', { amount: parseFloat(amount), channel: channel || 'manual', address: address || '' });
-  console.log(JSON.stringify(data, null, 2));
+  // Smart wallet withdrawal (new flow)
+  const chain = channel || 'base'; // channel param reused as chain
+  try {
+    const data = await signedFetch('POST', '/trade/v1/wallet/withdraw', {
+      amount: parseFloat(amount),
+      address: address,
+      chain: chain,
+    });
+    console.log(JSON.stringify(data, null, 2));
+  } catch (e) {
+    // Fallback to legacy withdrawal
+    console.error('Smart wallet withdrawal failed:', e.message);
+    console.error('Trying legacy withdrawal...');
+    try {
+      const data = await signedFetch('POST', '/account/v1/withdraw', { amount: parseFloat(amount), channel: 'crypto_' + chain, address });
+      console.log(JSON.stringify(data, null, 2));
+    } catch (e2) {
+      console.error('Withdrawal failed:', e2.message);
+    }
+  }
 }
 
 async function cmdTransactions() {
