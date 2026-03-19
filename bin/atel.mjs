@@ -1754,11 +1754,13 @@ async function startToolGatewayProxy(port, identity, policy) {
 
 async function cmdStart(port) {
   const id = requireIdentity();
-  // Initialize Ollama (auto-start and download model)
-  await initializeOllama().catch(err => {
-    console.error(`[Ollama] Initialization failed: ${err.message}`);
-    console.error(`[Ollama] Audit will use rule-based verification only`);
-  });
+  // Initialize Ollama only if explicitly enabled (optional local AI audit)
+  if (process.env.ATEL_OLLAMA_ENABLED === 'true') {
+    await initializeOllama().catch(err => {
+      console.error(`[Ollama] Initialization failed: ${err.message}`);
+      console.error(`[Ollama] Audit will use rule-based verification only`);
+    });
+  }
 
   const p = parseInt(port || '3100');
   const caps = loadCapabilities();
@@ -2186,6 +2188,40 @@ async function cmdStart(port) {
         if (acceptResp.ok) {
           log({ event: 'order_accepted', orderId });
           res.json({ status: 'accepted', orderId });
+
+          // Auto-approve milestone plan after accepting (non-blocking)
+          setTimeout(async () => {
+            try {
+              // Wait for milestones to be generated
+              for (let wait = 0; wait < 10; wait++) {
+                await new Promise(r => setTimeout(r, 3000));
+                const msResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(5000) });
+                const msData = await msResp.json();
+                if (msData.totalMilestones > 0) {
+                  log({ event: 'milestone_plan_found', orderId, count: msData.totalMilestones });
+                  // Auto-approve
+                  const ts = new Date().toISOString();
+                  const approvePayload = { approved: true };
+                  const signable = { did: id.did, timestamp: ts, payload: approvePayload };
+                  const sig = sign(signable, id.secretKey);
+                  const fbResp = await fetch(`${ATEL_PLATFORM}/trade/v1/order/${orderId}/milestones/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ did: id.did, timestamp: ts, signature: sig, payload: approvePayload }),
+                    signal: AbortSignal.timeout(10000),
+                  });
+                  if (fbResp.ok) {
+                    log({ event: 'milestone_auto_approved', orderId });
+                  } else {
+                    log({ event: 'milestone_auto_approve_failed', orderId, status: fbResp.status });
+                  }
+                  break;
+                }
+              }
+            } catch (e) {
+              log({ event: 'milestone_auto_approve_error', orderId, error: e.message });
+            }
+          }, 2000);
         } else {
           const error = await acceptResp.text();
           log({ event: 'order_accept_failed', orderId, error, status: acceptResp.status });
@@ -2285,6 +2321,14 @@ async function cmdStart(port) {
       }
 
       res.json({ status: 'received', orderId });
+      return;
+    }
+
+    // Milestone events — log for visibility
+    if (event === 'milestone_submitted' || event === 'milestone_verified' || event === 'milestone_rejected' || event === 'escrow_confirmed') {
+      const { orderId, milestoneIndex } = payload;
+      log({ event: 'milestone_notification', type: event, orderId, milestoneIndex });
+      res.json({ status: 'received', event });
       return;
     }
 
