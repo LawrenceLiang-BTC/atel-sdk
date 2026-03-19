@@ -2326,8 +2326,22 @@ async function cmdStart(port) {
 
     // Milestone events
     if (event === 'milestone_submitted') {
-      const { orderId, milestoneIndex } = payload;
-      log({ event: 'milestone_submitted_notification', orderId, milestoneIndex, message: 'Requester should verify this milestone' });
+      const { orderId, milestoneIndex, resultSummary, submitCount } = payload;
+      log({
+        event: 'milestone_submitted_notification',
+        orderId,
+        milestoneIndex,
+        resultSummary: resultSummary || '(no summary)',
+        submitCount,
+        message: `M${milestoneIndex} submitted. Review the content and verify:`,
+        action: `atel milestone-verify ${orderId} ${milestoneIndex} --pass   (or --reject "reason")`,
+      });
+      // Print prominently so the agent/user actually sees the content
+      console.log(`\n📋 [Milestone M${milestoneIndex} submitted for ${orderId}]`);
+      console.log(`   Content: ${resultSummary || '(no summary provided)'}`);
+      console.log(`   Attempt: ${submitCount || 1}/3`);
+      console.log(`   Action:  atel milestone-verify ${orderId} ${milestoneIndex} --pass`);
+      console.log(`            atel milestone-verify ${orderId} ${milestoneIndex} --reject "reason"\n`);
       res.json({ status: 'received', event });
       return;
     }
@@ -4810,6 +4824,25 @@ async function cmdMilestoneVerify(orderId, indexStr) {
   const pass = rawArgs.includes('--pass');
   const rejectIdx = rawArgs.findIndex(a => a === '--reject');
   const hasReject = rejectIdx >= 0;
+
+  // Show milestone content before verifying (so agent actually reviews it)
+  try {
+    const msResp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(5000) });
+    if (msResp.ok) {
+      const msData = await msResp.json();
+      const milestone = (msData.milestones || []).find(m => m.index === parseInt(indexStr));
+      if (milestone) {
+        console.log(`\n━━━ Reviewing M${indexStr} ━━━`);
+        console.log(`  Goal:    ${milestone.title}`);
+        console.log(`  Status:  ${milestone.status}`);
+        if (milestone.resultSummary) {
+          console.log(`  Content: ${milestone.resultSummary}`);
+        }
+        console.log(`  Attempts: ${milestone.submitCount}/3`);
+        console.log(`━━━━━━━━━━━━━━━━━━━\n`);
+      }
+    }
+  } catch {}
 
   // Strict mutual exclusion (audit fix #5)
   if (pass && hasReject) {
