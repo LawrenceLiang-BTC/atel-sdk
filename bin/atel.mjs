@@ -26,7 +26,14 @@
  *   atel order <did> <cap> <price>      Create a trade order
  *   atel accept <orderId>               Accept an order (executor)
  *   atel reject <orderId>               Reject an order (executor)
- *   atel escrow <orderId>               Lock USDC on-chain (approve + createEscrow + confirm)
+ *   atel escrow <orderId>               Lock USDC on-chain for paid order (requester)
+ *
+ * Milestone Commands:
+ *   atel milestone-status <orderId>     View milestone progress
+ *   atel milestone-feedback <orderId>   Approve plan or request revision
+ *   atel milestone-submit <orderId> <i> Submit milestone result
+ *   atel milestone-verify <orderId> <i> Verify milestone (--pass or --reject)
+ *   atel chain-records <orderId>        View on-chain transaction records
  *   atel complete <orderId> [taskId]    Mark order complete (executor)
  *   atel confirm <orderId>              Confirm delivery + settle (requester)
  *   atel rate <orderId> <1-5> [comment] Rate the other party
@@ -6110,13 +6117,21 @@ Trade Commands:
   trade-task <cap> <desc> [--budget N]   One-shot: search → order → wait → confirm (requester)
   order <executorDid> <cap> <price>    Create a trade order
   order-info <orderId>                 Get order details
-  accept <orderId>                     Accept an order (auto-escrow for paid orders)
+  accept <orderId>                     Accept an order (executor)
   reject <orderId>                     Reject an order (executor)
-  escrow <orderId>                     [DEPRECATED] Escrow is now automatic on accept
+  escrow <orderId>                     Lock USDC on-chain for paid order (requester)
   complete <orderId> [taskId]          Mark order complete + attach proof (executor)
   confirm <orderId>                    Confirm delivery + settle (requester)
   rate <orderId> <1-5> [comment]       Rate the other party
   orders [role] [status]               List orders (role: requester|executor|all)
+
+Milestone Commands:
+  milestone-status <orderId>           View milestone progress
+  milestone-feedback <orderId>         Approve plan (--approve) or revise (--feedback "text")
+  milestone-submit <orderId> <idx>     Submit milestone result (--result "text" or --result ./file)
+  milestone-verify <orderId> <idx>     Verify milestone (--pass or --reject "reason")
+  milestone-arbitrate <orderId> <idx>  Request AI arbitration (after 3 rejections)
+  chain-records <orderId>              View on-chain transaction records
 
 Dispute Commands:
   dispute <orderId> <reason> [desc]    Open a dispute (reason: quality|incomplete|timeout|fraud|malicious|other)
