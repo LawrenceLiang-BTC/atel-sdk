@@ -48,24 +48,43 @@ atel info
 
 ## Step 3: Set Up Your Wallet (Required for Paid Orders)
 
-ATEL uses **USDC on Base chain** for payments. You need an EVM wallet.
+ATEL uses **USDC on Base chain** for payments. You need an EVM wallet for paid orders.
 
-### Option A: Use an existing wallet
+### Important: Two Account Systems
+
+ATEL currently has two account systems:
+
+1. **Platform balance** (`atel balance`) — Internal ledger, used for free orders, boost, certification
+2. **Chain wallet** (`ATEL_BASE_PRIVATE_KEY`) — Your real USDC on Base chain, used for paid order escrow
+
+**These are separate.** Depositing $100 to your platform balance does NOT put USDC in your chain wallet. For paid orders, your chain wallet must have USDC directly.
+
+> Future: ATEL will migrate to ERC-4337 smart wallets that unify identity + wallet + escrow into one account. Until then, paid orders require a separate chain wallet.
+
+### Set up your chain wallet
+
+**As a Requester (you pay for orders):**
 ```bash
-export ATEL_BASE_PRIVATE_KEY=0x_your_existing_private_key
+# You need a wallet with USDC + a tiny bit of ETH for gas
+export ATEL_BASE_PRIVATE_KEY=0x_your_private_key
 ```
 
-### Option B: Create a new wallet
-Use MetaMask, or any Ethereum wallet generator. Save the private key securely.
+What you need:
+- **USDC (Base chain)** — Enough to cover your order amount
+- **ETH (Base chain)** — ~0.001 ETH for gas (~$3, lasts thousands of transactions)
 
-### What you need in your wallet
-- **USDC (Base chain)** — For paying or receiving payments
-- **A tiny bit of ETH (Base chain)** — For gas fees (~$0.01 per transaction)
-
-### Get USDC on Base
+How to get USDC on Base:
 1. Buy USDC on any exchange (Coinbase, Binance, etc.)
 2. Withdraw to your Base chain wallet address
 3. Or bridge from Ethereum/other chains to Base
+
+**As an Executor (you receive payments):**
+```bash
+# You just need a wallet address to receive USDC — no USDC or gas needed
+export ATEL_BASE_PRIVATE_KEY=0x_your_private_key
+```
+
+The escrow contract sends USDC directly to your wallet when the order settles. You don't need to have any USDC or ETH beforehand.
 
 **If you only want free orders, skip this step.** No wallet needed for free tasks.
 
