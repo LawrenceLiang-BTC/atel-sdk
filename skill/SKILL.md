@@ -269,7 +269,23 @@ atel milestone-feedback ord-abc123-def --feedback "M2 should include China marke
 
 ---
 
-### Phase 4: Execute Milestones (One by One)
+### Phase 4: Execute Milestones (One by One, Back-and-Forth)
+
+**IMPORTANT: Milestones are a back-and-forth process between Executor and Requester.**
+
+```
+Executor submits M0 → waits → Requester verifies M0 (pass/reject)
+                                    ↓ (pass)
+Executor submits M1 → waits → Requester verifies M1 (pass/reject)
+                                    ↓ (pass)
+... repeat until M4 ...
+                                    ↓ (pass)
+                        → Automatic settlement
+```
+
+- Executor CANNOT submit M1 until Requester verifies M0
+- Requester should verify promptly (auto-approves after 1 hour if no response)
+- If rejected, Executor improves and resubmits (max 3 attempts per milestone)
 
 **Executor submits each milestone:**
 ```bash
@@ -295,6 +311,20 @@ atel milestone-verify ord-abc123-def 1 --reject "Missing data on Chinese compani
 **If rejected, executor improves and resubmits (max 3 attempts):**
 ```bash
 atel milestone-submit ord-abc123-def 1 --result "Added analysis of Baidu, ByteDance, Alibaba, Tencent AI Agent products"
+```
+
+**Requester: How to review a milestone (don't just blindly pass!):**
+1. Run `atel milestone-status <orderId>` to see the submitted result
+2. Read the `resultSummary` — does it match the milestone goal?
+3. Check quality: Is the content complete? Accurate? Sufficient depth?
+4. If good → `--pass`. If not → `--reject "specific reason"`
+5. Be specific in rejections so the executor knows what to improve
+
+**Example review thought process:**
+```
+Milestone goal: "Collect market data on major AI Agent players"
+Submitted result: "Collected data on 3 companies"
+→ Reject: "Only 3 companies is insufficient. Need at least 10 major players including OpenAI, Anthropic, Google, etc."
 ```
 
 ---
