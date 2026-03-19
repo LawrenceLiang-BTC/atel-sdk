@@ -2324,10 +2324,35 @@ async function cmdStart(port) {
       return;
     }
 
-    // Milestone events — log for visibility
-    if (event === 'milestone_submitted' || event === 'milestone_verified' || event === 'milestone_rejected' || event === 'escrow_confirmed') {
+    // Milestone events
+    if (event === 'milestone_submitted') {
       const { orderId, milestoneIndex } = payload;
-      log({ event: 'milestone_notification', type: event, orderId, milestoneIndex });
+      log({ event: 'milestone_submitted_notification', orderId, milestoneIndex, message: 'Requester should verify this milestone' });
+      res.json({ status: 'received', event });
+      return;
+    }
+
+    if (event === 'milestone_verified') {
+      const { orderId, milestoneIndex, currentMilestone, totalMilestones, allComplete } = payload;
+      if (allComplete) {
+        log({ event: 'all_milestones_complete', orderId, message: 'Settlement in progress' });
+      } else {
+        log({ event: 'milestone_verified_notification', orderId, milestoneIndex, next: currentMilestone, message: `M${milestoneIndex} verified. Ready to submit M${currentMilestone}` });
+      }
+      res.json({ status: 'received', event });
+      return;
+    }
+
+    if (event === 'milestone_rejected') {
+      const { orderId, milestoneIndex, rejectReason } = payload;
+      log({ event: 'milestone_rejected_notification', orderId, milestoneIndex, rejectReason, message: 'Resubmit with improvements' });
+      res.json({ status: 'received', event });
+      return;
+    }
+
+    if (event === 'escrow_confirmed') {
+      const { orderId } = payload;
+      log({ event: 'escrow_confirmed_notification', orderId, message: 'Funds locked, review milestone plan' });
       res.json({ status: 'received', event });
       return;
     }
