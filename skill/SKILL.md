@@ -377,7 +377,7 @@ atel balance
 atel deposit 100 crypto_base
 
 # Withdraw USDC to your wallet
-atel withdraw 50 crypto_base 0xYourWalletAddress
+atel withdraw 50 0xYourWalletAddress          # withdraw to external wallet (Base)
 
 # Transaction history
 atel transactions
@@ -523,7 +523,7 @@ Paid:  created → pending_escrow → milestone_review → executing → pending
 |---------|-------------|
 | `atel balance` | Check balance |
 | `atel deposit <amount> [channel]` | Deposit |
-| `atel withdraw <amount> [channel] [address]` | Withdraw |
+| `atel withdraw <amount> <address> [chain]` | Withdraw USDC to external wallet |
 
 ### Disputes
 | Command | Description |
