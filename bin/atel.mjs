@@ -1519,7 +1519,28 @@ async function cmdAnchor(subcommand) {
 
 async function cmdInfo() {
   const id = requireIdentity();
-  console.log(JSON.stringify({ agent_id: id.agent_id, did: id.did, capabilities: loadCapabilities(), policy: loadPolicy(), network: loadNetwork(), executor: EXECUTOR_URL || 'not configured' }, null, 2));
+  const info = { agent_id: id.agent_id, did: id.did, capabilities: loadCapabilities(), policy: loadPolicy(), network: loadNetwork(), executor: EXECUTOR_URL || 'not configured' };
+
+  // Fetch wallet info from Platform
+  try {
+    const resp = await fetch(`${PLATFORM_URL}/registry/v1/agent/${encodeURIComponent(id.did)}`, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) {
+      const agent = await resp.json();
+      if (agent.wallets) {
+        let wallets;
+        try { wallets = typeof agent.wallets === 'string' ? JSON.parse(agent.wallets) : agent.wallets; } catch { wallets = agent.wallets; }
+        info.wallets = wallets;
+        console.log('\n💳 Smart Wallet Addresses:');
+        if (wallets.base) console.log(`  Base: ${wallets.base}`);
+        if (wallets.bsc) console.log(`  BSC:  ${wallets.bsc}`);
+        if (wallets.type) console.log(`  Type: ${wallets.type}`);
+        console.log('\n  Transfer USDC to the address above to fund your wallet.');
+        console.log('  No ETH/BNB needed — platform pays gas.\n');
+      }
+    }
+  } catch {}
+
+  console.log(JSON.stringify(info, null, 2));
 }
 
 async function cmdStatus() {
@@ -4104,34 +4125,40 @@ async function signedFetch(method, path, payload = {}) {
 // ─── Account Commands ────────────────────────────────────────────
 
 async function cmdBalance() {
-  // Show both DB balance (legacy) and on-chain USDC balance
-  try {
-    const data = await signedFetch('GET', '/account/v1/balance');
-    console.log('[DB Balance (legacy)]');
-    console.log(JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.error('[DB Balance] unavailable:', e.message);
-  }
+  const id = requireIdentity();
 
-  // On-chain USDC balance
+  // Get smart wallet addresses from Platform
+  let wallets = {};
+  try {
+    const resp = await fetch(`${PLATFORM_URL}/registry/v1/agent/${encodeURIComponent(id.did)}`, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) {
+      const agent = await resp.json();
+      if (agent.wallets) {
+        try { wallets = typeof agent.wallets === 'string' ? JSON.parse(agent.wallets) : agent.wallets; } catch {}
+      }
+    }
+  } catch {}
+
+  // Show on-chain USDC balance for smart wallets
   const chains = ['base', 'bsc'];
   const chainConfigs = {
     base: { rpcUrl: process.env.ATEL_BASE_RPC_URL || 'https://mainnet.base.org', usdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 },
     bsc: { rpcUrl: process.env.ATEL_BSC_RPC_URL || 'https://bsc-dataseed.binance.org', usdcAddress: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', decimals: 18 }
   };
 
+  console.log('\n💰 Balance:');
   for (const chain of chains) {
-    const key = getChainPrivateKey(chain);
-    if (!key) continue;
+    const walletAddr = wallets[chain];
+    if (!walletAddr) continue;
     try {
       const { ethers } = await import('ethers');
       const provider = new ethers.JsonRpcProvider(chainConfigs[chain].rpcUrl);
-      const wallet = new ethers.Wallet(key, provider);
       const usdc = new ethers.Contract(chainConfigs[chain].usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
-      const balance = await usdc.balanceOf(wallet.address);
-      console.log(`[${chain.toUpperCase()} USDC] ${ethers.formatUnits(balance, chainConfigs[chain].decimals)} USDC (wallet: ${wallet.address})`);
+      const balance = await usdc.balanceOf(walletAddr);
+      console.log(`  ${chain.toUpperCase()}: ${ethers.formatUnits(balance, chainConfigs[chain].decimals)} USDC`);
+      console.log(`    Wallet: ${walletAddr}`);
     } catch (e) {
-      console.error(`[${chain.toUpperCase()} USDC] query failed: ${e.message}`);
+      console.log(`  ${chain.toUpperCase()}: query failed (${e.message})`);
     }
   }
 }
