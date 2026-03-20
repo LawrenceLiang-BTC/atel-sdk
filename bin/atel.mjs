@@ -1946,13 +1946,23 @@ async function cmdStart(port) {
   const toolGatewayServer = await startToolGatewayProxy(toolProxyPort, id, policy);
   log({ event: 'tool_gateway_started', port: toolProxyPort });
 
-  // ── Executor: Agent brings their own AI. SDK does not run a built-in executor. ──
-  // If ATEL_EXECUTOR_URL is set, P2P tasks are forwarded there.
-  // Milestone work is done by the Agent itself (not the SDK).
-  if (EXECUTOR_URL) {
-    log({ event: 'external_executor_configured', url: EXECUTOR_URL });
+  // ── Agent AI integration ──
+  // Auto-detect OpenClaw for agent hook
+  let detectedAgentCmd = process.env.ATEL_AGENT_CMD || '';
+  if (!detectedAgentCmd) {
+    try {
+      const { execSync } = await import('child_process');
+      execSync('which openclaw', { stdio: 'ignore' });
+      detectedAgentCmd = 'openclaw agent --agent main --local -m';
+      log({ event: 'agent_hook_auto_detected', cmd: 'openclaw', note: 'Notifications will auto-trigger OpenClaw agent' });
+      console.log('🤝 OpenClaw detected — agent hook enabled (notifications auto-trigger your AI)');
+    } catch {
+      log({ event: 'no_agent_hook', note: 'No OpenClaw or ATEL_AGENT_CMD. Notifications write to inbox only.' });
+      console.log('📋 No agent AI detected. Notifications go to .atel/inbox.jsonl — process manually or set ATEL_AGENT_CMD.');
+    }
   } else {
-    log({ event: 'no_executor', note: 'No ATEL_EXECUTOR_URL set. Agent handles tasks via notifications + CLI.' });
+    log({ event: 'agent_hook_configured', cmd: detectedAgentCmd });
+    console.log(`🤝 Agent hook: ${detectedAgentCmd.substring(0, 50)}...`);
   }
 
   // ── Trust Score Client (persistent) ──
@@ -2190,19 +2200,32 @@ async function cmdStart(port) {
     }
 
     // 4. Agent command hook: forward notification to agent's AI
-    const agentCmd = process.env.ATEL_AGENT_CMD;
+    // Use the agent command detected at startup
+    const agentCmd = detectedAgentCmd;
     if (agentCmd && prompt) {
-      const { exec } = await import('child_process');
-      const fullPrompt = prompt.replace(/'/g, "'\\''");
-      const cmd = `${agentCmd} '${fullPrompt}'`;
-      log({ event: 'agent_cmd_trigger', eventType: event, cmd: cmd.substring(0, 100) });
-      exec(cmd, { timeout: 300000, cwd: process.cwd() }, (err, stdout, stderr) => {
-        if (err) {
-          log({ event: 'agent_cmd_error', eventType: event, error: err.message });
-        } else {
-          log({ event: 'agent_cmd_done', eventType: event, stdout: (stdout || '').substring(0, 200) });
-        }
-      });
+      // Add working directory context so agent runs atel commands in the right place
+      const cwd = process.cwd();
+      const cwdNote = `\n\n重要：所有 atel 命令必须在目录 ${cwd} 下执行（cd ${cwd} && atel ...）。`;
+      const enrichedPrompt = prompt + cwdNote;
+      const fullPrompt = enrichedPrompt.replace(/'/g, "'\\''");
+      const dedupeKey = body.dedupeKey || `${event}:${body.orderId || ''}`;
+
+      // Skip if already triggered for this dedupeKey
+      if (processedEvents.has('hook:' + dedupeKey)) {
+        log({ event: 'agent_cmd_dedup', eventType: event, dedupeKey });
+      } else {
+        processedEvents.add('hook:' + dedupeKey);
+        const { exec } = await import('child_process');
+        const cmd = `${agentCmd} '${fullPrompt}'`;
+        log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey, cmd: cmd.substring(0, 80) });
+        exec(cmd, { timeout: 600000, cwd }, (err, stdout, stderr) => {
+          if (err) {
+            log({ event: 'agent_cmd_error', eventType: event, error: err.message, stderr: (stderr || '').substring(0, 100) });
+          } else {
+            log({ event: 'agent_cmd_done', eventType: event, stdout: (stdout || '').substring(0, 300) });
+          }
+        });
+      }
     }
 
     res.json({ status: 'received', eventId, eventType: event });
