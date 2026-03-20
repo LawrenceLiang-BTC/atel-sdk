@@ -2255,23 +2255,35 @@ async function cmdStart(port) {
         log({ event: 'agent_cmd_dedup', eventType: event, dedupeKey });
       } else {
         processedEvents.add('hook:' + dedupeKey);
-        const { exec } = await import('child_process');
-        // Use isolated session to avoid lock conflicts with concurrent notifications
-        // --session must come BEFORE -m for openclaw
-        let cmd;
-        if (agentCmd.includes('openclaw') && agentCmd.includes('-m')) {
-          cmd = agentCmd.replace('-m', '--session isolated -m') + ` '${fullPrompt}'`;
-        } else {
-          cmd = `${agentCmd} '${fullPrompt}'`;
-        }
-        log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey });
+        const { execFile, exec } = await import('child_process');
 
-        // Execute with retry on failure
+        // Build command as argv array (not string concat) to avoid path corruption
+        let spawnCmd, spawnArgs;
+        const parsedCmd = agentCmd.trim().split(/\s+/);
+        if (agentCmd.includes('openclaw')) {
+          // Find where '-m' is and insert '--session isolated' before it
+          const mIdx = parsedCmd.lastIndexOf('-m');
+          if (mIdx > 0) {
+            parsedCmd.splice(mIdx, 0, '--session', 'isolated');
+          }
+          parsedCmd.push(enrichedPrompt); // prompt as final arg (no shell escaping needed)
+          spawnCmd = parsedCmd[0];
+          spawnArgs = parsedCmd.slice(1);
+        } else {
+          parsedCmd.push(enrichedPrompt);
+          spawnCmd = parsedCmd[0];
+          spawnArgs = parsedCmd.slice(1);
+        }
+
+        log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey, cmd: spawnCmd, argsCount: spawnArgs.length });
+
+        // Execute with retry (only on timeout/connection errors, not on argument errors)
         const runHook = (attempt) => {
-          exec(cmd, { timeout: 600000, cwd }, (err, stdout, stderr) => {
-            if (err && attempt < 2) {
+          const child = execFile(spawnCmd, spawnArgs, { timeout: 600000, cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            const isRetryable = err && (err.killed || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET');
+            if (isRetryable && attempt < 2) {
               log({ event: 'agent_cmd_retry', eventType: event, attempt: attempt + 1, error: err.message });
-              setTimeout(() => runHook(attempt + 1), 10000); // retry after 10s
+              setTimeout(() => runHook(attempt + 1), 10000);
             } else if (err) {
               log({ event: 'agent_cmd_error', eventType: event, error: err.message, stderr: (stderr || '').substring(0, 200) });
             } else {
@@ -3142,7 +3154,33 @@ async function cmdStart(port) {
         metadata: { preferredChain } 
       }, id);
       log({ event: 'auto_registered', registry: REGISTRY_URL, candidates: networkConfig.candidates.length, discoverable, wallets: wallets ? Object.keys(wallets) : [], preferredChain });
-    } catch (e) { log({ event: 'auto_register_failed', error: e.message }); }
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('409')) {
+        // Classify conflict type
+        if (msg.includes('endpoint already registered')) {
+          log({ event: 'auto_register_endpoint_conflict', error: msg, note: 'Another agent holds this endpoint. Will retry on next heartbeat cycle.' });
+        } else if (msg.includes('name already taken')) {
+          log({ event: 'auto_register_name_conflict', error: msg, note: 'Agent name conflict. Rename in .atel/identity.json or re-init.' });
+        } else {
+          log({ event: 'auto_register_conflict', error: msg });
+        }
+        // Schedule retry in 60 seconds (stale agent may go offline by then)
+        setTimeout(async () => {
+          try {
+            await signedFetch('POST', '/registry/v1/register', {
+              name: capTypes.join('+') || id.agent_id, capabilities: caps, endpoint: bestEndpoint,
+              candidates: networkConfig.candidates, discoverable, wallets, metadata: { preferredChain }
+            }, id);
+            log({ event: 'auto_register_retry_ok' });
+          } catch (retryErr) {
+            log({ event: 'auto_register_retry_failed', error: retryErr.message });
+          }
+        }, 60000);
+      } else {
+        log({ event: 'auto_register_failed', error: msg });
+      }
+    }
   }
 
   // Register with relay server and start polling for relayed requests
@@ -3172,7 +3210,8 @@ async function cmdStart(port) {
         const rawMessages = data.messages || data.requests || [];
         if (rawMessages.length === 0) return;
 
-        const processedIds = []; // track successfully processed message IDs for ACK
+        const ackedIds = [];   // only ACK after confirmed local persistence
+        const failedIds = [];  // don't ACK — will be re-delivered
 
         for (const m of rawMessages) {
           const inner = m.message || m;
@@ -3186,21 +3225,29 @@ async function cmdStart(port) {
             };
             if (method !== 'GET' && method !== 'HEAD') fetchOpts.body = JSON.stringify(req.body);
             const localResp = await fetch(`http://127.0.0.1:${p}${req.path}`, fetchOpts);
-            await localResp.json();
-            if (m.id) processedIds.push(m.id); // mark for ACK
+            const result = await localResp.json();
+            // ACK only if local endpoint confirmed receipt (status 'received' or 'already_processed')
+            if (localResp.ok && m.id) {
+              ackedIds.push(m.id);
+            } else if (m.id) {
+              failedIds.push(m.id);
+            }
           } catch (e) {
-            // Still ACK even on local processing error (to prevent infinite retry)
-            if (m.id) processedIds.push(m.id);
+            // Local forwarding failed — do NOT ACK, let relay re-deliver
+            if (m.id) failedIds.push(m.id);
           }
         }
 
-        // ACK processed messages so relay doesn't re-deliver them
-        if (processedIds.length > 0) {
+        // ACK only successfully persisted messages
+        if (ackedIds.length > 0) {
           await fetch(`${relayUrl}/relay/v1/ack`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ did: id.did, ids: processedIds }),
+            body: JSON.stringify({ did: id.did, ids: ackedIds }),
             signal: AbortSignal.timeout(5000),
           }).catch(() => {});
+        }
+        if (failedIds.length > 0) {
+          log({ event: 'relay_messages_not_acked', ids: failedIds, note: 'will be re-delivered in 60s' });
         }
       } catch {}
     };

@@ -138,34 +138,45 @@ export class HeartbeatManager {
   }
 
   async sendHeartbeat() {
-    try {
-      const timestamp = new Date().toISOString();
-      const payload = { did: this.identity.did };
-      
-      // Sign the request - sign the serialized payload
-      const { default: nacl } = await import('tweetnacl');
-      const signable = serializePayload({ payload, did: this.identity.did, timestamp });
-      const signableBytes = new TextEncoder().encode(signable);
-      const signature = Buffer.from(
-        nacl.sign.detached(signableBytes, this.identity.secretKey)
-      ).toString('base64');
+    const maxRetries = 2;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const timestamp = new Date().toISOString();
+        const payload = { did: this.identity.did };
 
-      const start = Date.now();
-      const url = `${this.registryUrl}/registry/v1/heartbeat`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ payload, did: this.identity.did, timestamp, signature }),
-        signal: AbortSignal.timeout(15000),
-      });
+        const { default: nacl } = await import('tweetnacl');
+        const signable = serializePayload({ payload, did: this.identity.did, timestamp });
+        const signableBytes = new TextEncoder().encode(signable);
+        const signature = Buffer.from(
+          nacl.sign.detached(signableBytes, this.identity.secretKey)
+        ).toString('base64');
 
-      if (resp.ok) {
-        console.log(`[Heartbeat] OK (${Date.now()-start}ms)`);
-      } else {
-        console.error(`[Heartbeat] Failed: ${resp.status} ${await resp.text()} (${Date.now()-start}ms)`);
+        const start = Date.now();
+        const url = `${this.registryUrl}/registry/v1/heartbeat`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payload, did: this.identity.did, timestamp, signature }),
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (resp.ok) {
+          console.log(`[Heartbeat] OK (${Date.now()-start}ms)`);
+          return;
+        } else {
+          console.error(`[Heartbeat] Failed: ${resp.status} ${await resp.text()} (${Date.now()-start}ms)`);
+          return; // HTTP error = don't retry (server responded)
+        }
+      } catch (e) {
+        // Only retry on network errors (timeout, DNS, connection reset)
+        const isNetworkError = e.code === 'ETIMEDOUT' || e.code === 'ECONNRESET' || e.code === 'ENOTFOUND' || e.message?.includes('fetch failed');
+        if (isNetworkError && attempt < maxRetries - 1) {
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        console.error(`[Heartbeat] Error: ${e.message} (url: ${this.registryUrl})`);
+        return;
       }
-    } catch (e) {
-      console.error(`[Heartbeat] Error: ${e.message} (url: ${this.registryUrl})`);
     }
   }
 }
