@@ -4091,7 +4091,7 @@ async function cmdRotate() {
 
 // ─── Platform API Helpers ────────────────────────────────────────
 
-const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_REGISTRY || 'https://api.atelai.org';
+const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_API || process.env.ATEL_REGISTRY || 'https://api.atelai.org';
 
 async function signedFetch(method, path, payload = {}) {
   const id = requireIdentity();
@@ -4773,6 +4773,8 @@ async function cmdMilestoneStatus(orderId) {
     return;
   }
   console.log(`\nOrder: ${orderId}`);
+  if (data.orderStatus) console.log(`Order Status: ${data.orderStatus}`);
+  if (data.phase) console.log(`Phase: ${data.phase}`);
   console.log(`Progress: ${data.currentMilestone}/${data.totalMilestones}\n`);
   for (const m of (data.milestones || [])) {
     const status = m.status === 'verified' ? '✅' : m.status === 'submitted' ? '📤' : m.status === 'rejected' ? '❌' : m.status === 'arbitrated' ? '⚖️' : '⏳';
