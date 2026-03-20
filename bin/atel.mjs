@@ -2300,10 +2300,6 @@ async function cmdStart(port) {
     };
     runHook(0);
   }
-    }
-
-    res.json({ status: 'received', eventId, eventType: event });
-  });
 
   // Result callback: POST /atel/v1/result (executor calls this when done)
   endpoint.app?.post?.('/atel/v1/result', async (req, res) => {
@@ -3206,61 +3202,99 @@ async function cmdStart(port) {
     } catch (e) { log({ event: 'relay_register_failed', error: e.message }); }
 
     // Poll loop: check relay for incoming requests, forward to local endpoint
+    let relayPollBusy = false;
     const pollRelay = async () => {
+      if (relayPollBusy) return;
+      relayPollBusy = true;
       try {
         const resp = await fetch(`${relayUrl}/relay/v1/poll`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ did: id.did }), signal: AbortSignal.timeout(5000),
+          body: JSON.stringify({ did: id.did }), signal: AbortSignal.timeout(15000),
         });
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          log({ event: 'relay_poll_http_error', relay: relayUrl, status: resp.status });
+          return;
+        }
         const data = await resp.json();
         const rawMessages = data.messages || data.requests || [];
         if (rawMessages.length === 0) return;
+
+        log({ event: 'relay_poll_messages', relay: relayUrl, count: rawMessages.length });
 
         const ackedIds = [];   // only ACK after confirmed local persistence
         const failedIds = [];  // don't ACK — will be re-delivered
 
         for (const m of rawMessages) {
           const inner = m.message || m;
-          const req = typeof inner === 'string' ? JSON.parse(inner) : inner;
+          let req;
+          try {
+            req = typeof inner === 'string' ? JSON.parse(inner) : inner;
+          } catch (e) {
+            if (m.id) failedIds.push(m.id);
+            log({ event: 'relay_message_parse_error', id: m.id, error: e.message, rawType: typeof inner });
+            continue;
+          }
+
           try {
             const method = req.method || 'POST';
+            const path = req.path || '/';
             const fetchOpts = {
               method,
               headers: { 'Content-Type': 'application/json' },
               signal: AbortSignal.timeout(30000),
             };
-            if (method !== 'GET' && method !== 'HEAD') fetchOpts.body = JSON.stringify(req.body);
-            const localResp = await fetch(`http://127.0.0.1:${p}${req.path}`, fetchOpts);
-            const result = await localResp.json();
-            // ACK only if local endpoint confirmed receipt (status 'received' or 'already_processed')
+            if (method !== 'GET' && method !== 'HEAD') fetchOpts.body = JSON.stringify(req.body || {});
+            const localUrl = `http://127.0.0.1:${p}${path}`;
+            const localResp = await fetch(localUrl, fetchOpts);
+            const rawText = await localResp.text();
+            let parsed;
+            try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+
+            // Treat any 2xx as successful local persistence. Body parsing is best-effort only.
             if (localResp.ok && m.id) {
               ackedIds.push(m.id);
+              log({ event: 'relay_forward_ok', id: m.id, path, status: localResp.status, resultStatus: parsed?.status });
             } else if (m.id) {
               failedIds.push(m.id);
+              log({ event: 'relay_forward_failed', id: m.id, path, status: localResp.status, body: rawText.substring(0, 300) });
             }
           } catch (e) {
             // Local forwarding failed — do NOT ACK, let relay re-deliver
             if (m.id) failedIds.push(m.id);
+            log({ event: 'relay_forward_error', id: m.id, path: req.path, error: e.message });
           }
         }
 
         // ACK only successfully persisted messages
         if (ackedIds.length > 0) {
-          await fetch(`${relayUrl}/relay/v1/ack`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ did: id.did, ids: ackedIds }),
-            signal: AbortSignal.timeout(5000),
-          }).catch(() => {});
+          try {
+            const ackResp = await fetch(`${relayUrl}/relay/v1/ack`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ did: id.did, ids: ackedIds }),
+              signal: AbortSignal.timeout(10000),
+            });
+            if (!ackResp.ok) {
+              log({ event: 'relay_ack_http_error', ids: ackedIds, status: ackResp.status });
+            }
+          } catch (e) {
+            log({ event: 'relay_ack_error', ids: ackedIds, error: e.message });
+          }
         }
         if (failedIds.length > 0) {
           log({ event: 'relay_messages_not_acked', ids: failedIds, note: 'will be re-delivered in 60s' });
         }
-      } catch {}
+      } catch (e) {
+        log({ event: 'relay_poll_error', relay: relayUrl, error: e.message });
+      } finally {
+        relayPollBusy = false;
+      }
     };
 
-    // Poll every 2 seconds + re-register every 2 minutes
-    setInterval(pollRelay, 2000);
+    // Poll immediately, then every 2 seconds + re-register every 2 minutes
+    pollRelay().catch((e) => log({ event: 'relay_poll_bootstrap_error', relay: relayUrl, error: e.message }));
+    setInterval(() => {
+      pollRelay().catch((e) => log({ event: 'relay_poll_interval_error', relay: relayUrl, error: e.message }));
+    }, 2000);
     setInterval(async () => {
       try {
         await fetch(`${relayUrl}/relay/v1/register`, {
