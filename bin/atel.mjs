@@ -2238,9 +2238,11 @@ async function cmdStart(port) {
     }
 
     // 4. Agent command hook: forward notification to agent's AI
-    // Use the agent command detected at startup
+    // Skip order_created — accepting orders requires human confirmation
+    // Only auto-trigger for milestone-related events
     const agentCmd = detectedAgentCmd;
-    if (agentCmd && prompt) {
+    const autoTriggerEvents = ['order_accepted', 'milestone_plan_confirmed', 'milestone_submitted', 'milestone_verified', 'milestone_rejected'];
+    if (agentCmd && prompt && autoTriggerEvents.includes(event)) {
       // Add working directory context so agent runs atel commands in the right place
       const cwd = process.cwd();
       const cwdNote = `\n\n重要：所有 atel 命令必须在目录 ${cwd} 下执行（cd ${cwd} && atel ...）。`;
