@@ -1947,22 +1947,60 @@ async function cmdStart(port) {
   log({ event: 'tool_gateway_started', port: toolProxyPort });
 
   // ── Agent AI integration ──
-  // Auto-detect OpenClaw for agent hook
+  // Auto-detect OpenClaw: check PATH, then ~/.openclaw, then common source locations
   let detectedAgentCmd = process.env.ATEL_AGENT_CMD || '';
   if (!detectedAgentCmd) {
+    const { execSync } = await import('child_process');
+    const home = process.env.HOME || '/root';
+
+    // Try 1: openclaw in PATH
     try {
-      const { execSync } = await import('child_process');
       execSync('which openclaw', { stdio: 'ignore' });
       detectedAgentCmd = 'openclaw agent --agent main --local -m';
-      log({ event: 'agent_hook_auto_detected', cmd: 'openclaw', note: 'Notifications will auto-trigger OpenClaw agent' });
-      console.log('🤝 OpenClaw detected — agent hook enabled (notifications auto-trigger your AI)');
-    } catch {
-      log({ event: 'no_agent_hook', note: 'No OpenClaw or ATEL_AGENT_CMD. Notifications write to inbox only.' });
-      console.log('📋 No agent AI detected. Notifications go to .atel/inbox.jsonl — process manually or set ATEL_AGENT_CMD.');
+    } catch {}
+
+    // Try 2: ~/.openclaw exists (installed but not in PATH — use npx or find binary)
+    if (!detectedAgentCmd) {
+      try {
+        const { existsSync } = await import('fs');
+        if (existsSync(join(home, '.openclaw', 'workspace'))) {
+          // Find openclaw binary or source
+          const candidates = [
+            '/usr/local/bin/openclaw',
+            '/usr/bin/openclaw',
+            join(home, '.openclaw', 'bin', 'openclaw'),
+          ];
+          for (const c of candidates) {
+            if (existsSync(c)) { detectedAgentCmd = `${c} agent --agent main --local -m`; break; }
+          }
+          // Try npx
+          if (!detectedAgentCmd) {
+            try { execSync('npx openclaw --version', { stdio: 'ignore', timeout: 5000 }); detectedAgentCmd = 'npx openclaw agent --agent main --local -m'; } catch {}
+          }
+          // Try source form (common dev setup)
+          if (!detectedAgentCmd) {
+            const srcPaths = [
+              join(home, 'Desktop', 'openclaw', 'localclaw', 'app', 'openclaw-main', 'openclaw.mjs'),
+              join(home, 'openclaw', 'openclaw.mjs'),
+            ];
+            for (const s of srcPaths) {
+              if (existsSync(s)) { detectedAgentCmd = `node ${s} agent --agent main --local -m`; break; }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (detectedAgentCmd) {
+      log({ event: 'agent_hook_auto_detected', cmd: detectedAgentCmd.substring(0, 60) });
+      console.log('🤝 OpenClaw detected — agent hook enabled');
+    } else {
+      log({ event: 'no_agent_hook', note: 'No OpenClaw found. Set ATEL_AGENT_CMD for agent automation.' });
+      console.log('📋 No agent AI detected. Set ATEL_AGENT_CMD or install OpenClaw.');
     }
   } else {
-    log({ event: 'agent_hook_configured', cmd: detectedAgentCmd });
-    console.log(`🤝 Agent hook: ${detectedAgentCmd.substring(0, 50)}...`);
+    log({ event: 'agent_hook_configured', cmd: detectedAgentCmd.substring(0, 60) });
+    console.log('🤝 Agent hook configured');
   }
 
   // ── Trust Score Client (persistent) ──
@@ -2216,7 +2254,9 @@ async function cmdStart(port) {
       } else {
         processedEvents.add('hook:' + dedupeKey);
         const { exec } = await import('child_process');
-        const cmd = `${agentCmd} '${fullPrompt}'`;
+        // Use isolated session to avoid lock conflicts with concurrent notifications
+        const sessionFlag = agentCmd.includes('openclaw') ? ' --session isolated' : '';
+        const cmd = `${agentCmd}${sessionFlag} '${fullPrompt}'`;
         log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey });
 
         // Execute with retry on failure
