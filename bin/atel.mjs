@@ -2261,12 +2261,13 @@ async function cmdStart(port) {
         let spawnCmd, spawnArgs;
         const parsedCmd = agentCmd.trim().split(/\s+/);
         if (agentCmd.includes('openclaw')) {
-          // Find where '-m' is and insert '--session isolated' before it
+          // Use unique session-id to avoid lock conflicts between concurrent hooks
+          const sessionId = `atel-${dedupeKey.replace(/[^a-zA-Z0-9-]/g, '-')}`;
           const mIdx = parsedCmd.lastIndexOf('-m');
           if (mIdx > 0) {
-            parsedCmd.splice(mIdx, 0, '--session', 'isolated');
+            parsedCmd.splice(mIdx, 0, '--session-id', sessionId);
           }
-          parsedCmd.push(enrichedPrompt); // prompt as final arg (no shell escaping needed)
+          parsedCmd.push(enrichedPrompt);
           spawnCmd = parsedCmd[0];
           spawnArgs = parsedCmd.slice(1);
         } else {
