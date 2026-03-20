@@ -2217,14 +2217,22 @@ async function cmdStart(port) {
         processedEvents.add('hook:' + dedupeKey);
         const { exec } = await import('child_process');
         const cmd = `${agentCmd} '${fullPrompt}'`;
-        log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey, cmd: cmd.substring(0, 80) });
-        exec(cmd, { timeout: 600000, cwd }, (err, stdout, stderr) => {
-          if (err) {
-            log({ event: 'agent_cmd_error', eventType: event, error: err.message, stderr: (stderr || '').substring(0, 100) });
-          } else {
-            log({ event: 'agent_cmd_done', eventType: event, stdout: (stdout || '').substring(0, 300) });
-          }
-        });
+        log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey });
+
+        // Execute with retry on failure
+        const runHook = (attempt) => {
+          exec(cmd, { timeout: 600000, cwd }, (err, stdout, stderr) => {
+            if (err && attempt < 2) {
+              log({ event: 'agent_cmd_retry', eventType: event, attempt: attempt + 1, error: err.message });
+              setTimeout(() => runHook(attempt + 1), 10000); // retry after 10s
+            } else if (err) {
+              log({ event: 'agent_cmd_error', eventType: event, error: err.message, stderr: (stderr || '').substring(0, 200) });
+            } else {
+              log({ event: 'agent_cmd_done', eventType: event, stdout: (stdout || '').substring(0, 300) });
+            }
+          });
+        };
+        runHook(0);
       }
     }
 
