@@ -2257,8 +2257,13 @@ async function cmdStart(port) {
         processedEvents.add('hook:' + dedupeKey);
         const { exec } = await import('child_process');
         // Use isolated session to avoid lock conflicts with concurrent notifications
-        const sessionFlag = agentCmd.includes('openclaw') ? ' --session isolated' : '';
-        const cmd = `${agentCmd}${sessionFlag} '${fullPrompt}'`;
+        // --session must come BEFORE -m for openclaw
+        let cmd;
+        if (agentCmd.includes('openclaw') && agentCmd.includes('-m')) {
+          cmd = agentCmd.replace('-m', '--session isolated -m') + ` '${fullPrompt}'`;
+        } else {
+          cmd = `${agentCmd} '${fullPrompt}'`;
+        }
         log({ event: 'agent_cmd_trigger', eventType: event, dedupeKey });
 
         // Execute with retry on failure
