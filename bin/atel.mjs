@@ -89,7 +89,7 @@ const RESULT_PUSH_QUEUE_FILE = resolve(ATEL_DIR, 'pending-result-pushes.json');
 const KEYS_DIR = resolve(ATEL_DIR, 'keys');
 const ANCHOR_FILE = resolve(KEYS_DIR, 'anchor.json');
 
-const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], taskMode: 'auto', autoAcceptPlatform: true, autoAcceptP2P: true, trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
+const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent: 10, allowedDIDs: [], blockedDIDs: [], taskMode: 'auto', autoAcceptPlatform: true, autoAcceptP2P: true, agentMode: 'manual', autoPolicy: { acceptOrders: false, acceptMaxAmount: 0, autoApprovePlan: false }, trustPolicy: { minScore: 0, newAgentPolicy: 'allow_low_risk', riskThresholds: { low: 0, medium: 50, high: 75, critical: 90 } } };
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -2112,8 +2112,8 @@ async function cmdStart(port) {
     // Log the full event
     log({ event: 'notification_received', eventId, eventType: event, orderId: body.orderId || payload.orderId, prompt: prompt ? prompt.substring(0, 100) : undefined });
 
-    // ── Universal notification handler: print prompt + log + respond ──
-    // SDK does NOT execute any actions. Agent reads inbox/webhook and decides.
+    // ── Universal notification handler ──
+    // 1. Print prompt + recommended actions
     if (prompt) {
       console.log(`\n📨 [${event}] ${prompt.split('\n')[0]}`);
     }
@@ -2124,7 +2124,7 @@ async function cmdStart(port) {
     }
     console.log('');
 
-    // Write full event to inbox for Agent program to read
+    // 2. Write full event to inbox for Agent program to read
     log({
       event: 'notification',
       eventId,
@@ -2136,6 +2136,58 @@ async function cmdStart(port) {
       sequenceNo: body.sequenceNo,
       dedupeKey: body.dedupeKey,
     });
+
+    // 3. Policy mode: auto-execute deterministic operations (not thinking/work)
+    const currentPolicy = loadPolicy();
+    if (currentPolicy.agentMode === 'policy') {
+      const ap = currentPolicy.autoPolicy || {};
+      const orderId = payload.orderId || body.orderId;
+
+      // Auto-accept orders (if configured)
+      if (event === 'order_created' && ap.acceptOrders) {
+        const amount = payload.priceAmount || 0;
+        if (ap.acceptMaxAmount <= 0 || amount <= ap.acceptMaxAmount) {
+          log({ event: 'policy_auto_accept', orderId, amount });
+          setTimeout(async () => {
+            try {
+              const ts = new Date().toISOString();
+              const sig = sign({ did: id.did, timestamp: ts, payload: {} }, id.secretKey);
+              await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/accept`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ did: id.did, timestamp: ts, signature: sig, payload: {} }),
+                signal: AbortSignal.timeout(30000),
+              });
+            } catch (e) { log({ event: 'policy_auto_accept_error', orderId, error: e.message }); }
+          }, 1000);
+        }
+      }
+
+      // Auto-approve milestone plan (if configured)
+      if (event === 'order_accepted' && ap.autoApprovePlan && payload.executorDid) {
+        log({ event: 'policy_auto_approve_plan', orderId });
+        setTimeout(async () => {
+          try {
+            for (let wait = 0; wait < 10; wait++) {
+              await new Promise(r => setTimeout(r, 3000));
+              const msResp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(5000) });
+              const msData = await msResp.json();
+              if (msData.totalMilestones > 0) {
+                const ts = new Date().toISOString();
+                const pl = { approved: true };
+                const sig = sign({ did: id.did, timestamp: ts, payload: pl }, id.secretKey);
+                await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones/feedback`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ did: id.did, timestamp: ts, signature: sig, payload: pl }),
+                  signal: AbortSignal.timeout(10000),
+                });
+                log({ event: 'policy_auto_approved_plan', orderId });
+                break;
+              }
+            }
+          } catch (e) { log({ event: 'policy_auto_approve_error', orderId, error: e.message }); }
+        }, 2000);
+      }
+    }
 
     res.json({ status: 'received', eventId, eventType: event });
     return;
