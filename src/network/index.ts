@@ -45,7 +45,7 @@ export interface ConnectResult {
 
 // ─── Constants ───────────────────────────────────────────────────
 
-const DEFAULT_RELAY = 'http://47.251.8.19:9000';
+const DEFAULT_RELAY = 'https://api.atelai.org';
 
 const IP_SERVICES = [
   'https://api.ipify.org',

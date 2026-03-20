@@ -3320,7 +3320,14 @@ async function cmdStart(port) {
           body: JSON.stringify({ did: id.did }), signal: AbortSignal.timeout(5000),
         });
         if (!resp.ok) return;
-        const { requests } = await resp.json();
+        const data = await resp.json();
+        // Relay returns {messages: [{id, sender, message, createdAt}]}
+        // Each message.message contains {method, path, body}
+        const rawMessages = data.messages || data.requests || [];
+        const requests = rawMessages.map(m => {
+          const inner = m.message || m;
+          return typeof inner === 'string' ? JSON.parse(inner) : inner;
+        });
         for (const req of requests) {
           // Forward to local endpoint
           try {
