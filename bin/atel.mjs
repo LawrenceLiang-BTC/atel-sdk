@@ -2189,6 +2189,22 @@ async function cmdStart(port) {
       }
     }
 
+    // 4. Agent command hook: forward notification to agent's AI
+    const agentCmd = process.env.ATEL_AGENT_CMD;
+    if (agentCmd && prompt) {
+      const { exec } = await import('child_process');
+      const fullPrompt = prompt.replace(/'/g, "'\\''");
+      const cmd = `${agentCmd} '${fullPrompt}'`;
+      log({ event: 'agent_cmd_trigger', eventType: event, cmd: cmd.substring(0, 100) });
+      exec(cmd, { timeout: 300000, cwd: process.cwd() }, (err, stdout, stderr) => {
+        if (err) {
+          log({ event: 'agent_cmd_error', eventType: event, error: err.message });
+        } else {
+          log({ event: 'agent_cmd_done', eventType: event, stdout: (stdout || '').substring(0, 200) });
+        }
+      });
+    }
+
     res.json({ status: 'received', eventId, eventType: event });
   });
 
