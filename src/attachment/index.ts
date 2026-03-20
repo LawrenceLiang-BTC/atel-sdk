@@ -136,10 +136,10 @@ export async function uploadAttachment(
   // Calculate hash
   const hash = calculateHash(filePath);
 
-  // Upload to platform
-  const FormData = (await import('form-data')).default;
+  // Upload to platform (use native FormData + Blob for Node 18+ fetch compatibility)
   const form = new FormData();
-  form.append('file', readFileSync(filePath), name);
+  const blob = new Blob([readFileSync(filePath)], { type: mimeType });
+  form.append('file', blob, name);
   form.append('kind', options.kind);
   form.append('uploadedBy', options.uploadedBy);
   if (options.taskId) {
