@@ -64,6 +64,7 @@ import {
   TrustGraph, calculateTaskWeight,
 } from '@lawrenceliang-btc/atel-sdk';
 import { TunnelManager, HeartbeatManager } from './tunnel-manager.mjs';
+import { buildAgentCallbackAction, getDirectExecutableActions, normalizeGatewayBind, shouldSkipAgentHook, shouldUseGatewaySession } from './notification-action-helpers.mjs';
 // ollama-manager removed — SDK does not run local models
 const initializeOllama = async () => {};
 const getOllamaStatus = async () => ({ running: false, models: [] });
@@ -87,6 +88,7 @@ const TRACES_DIR = resolve(ATEL_DIR, 'traces');
 const PENDING_FILE = resolve(ATEL_DIR, 'pending-tasks.json');
 const RESULT_PUSH_QUEUE_FILE = resolve(ATEL_DIR, 'pending-result-pushes.json');
 const NOTIFY_TARGETS_FILE = resolve(ATEL_DIR, 'notify-targets.json');
+const TRADE_TRACK_FILE = resolve(ATEL_DIR, 'tracked-orders.json');
 const KEYS_DIR = resolve(ATEL_DIR, 'keys');
 const ANCHOR_FILE = resolve(KEYS_DIR, 'anchor.json');
 
@@ -169,15 +171,23 @@ function discoverGateway() {
     const cfg = JSON.parse(readFileSync(join(process.env.HOME || '', '.openclaw/openclaw.json'), 'utf-8'));
     const token = cfg.gateway?.auth?.token || '';
     const port = cfg.gateway?.port || 18789;
-    const bind = cfg.gateway?.bind || '127.0.0.1';
+    const bind = normalizeGatewayBind(cfg.gateway?.bind || '127.0.0.1');
     return { url: `http://${bind}:${port}`, token };
   } catch { return null; }
+}
+
+function loadOpenClawConfig() {
+  try {
+    return JSON.parse(readFileSync(join(process.env.HOME || '', '.openclaw/openclaw.json'), 'utf-8'));
+  } catch {
+    return null;
+  }
 }
 
 // Read TG bot token from openclaw config
 function discoverTelegramBot() {
   try {
-    const cfg = JSON.parse(readFileSync(join(process.env.HOME || '', '.openclaw/openclaw.json'), 'utf-8'));
+    const cfg = loadOpenClawConfig();
     const botToken = cfg.channels?.telegram?.botToken;
     if (!botToken || botToken.includes('${')) return null; // template var, not resolved
     return botToken;
@@ -232,6 +242,83 @@ async function pushTradeNotification(eventType, payload, body) {
   }
   // Best-effort save lastUsedAt
   try { saveNotifyTargets(targets); } catch {}
+}
+
+async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey) {
+  const command = Array.isArray(action?.command) ? action.command.filter(Boolean) : [];
+  if (command.length === 0) {
+    return { ok: false, skipped: true, reason: 'empty_command' };
+  }
+
+  // Idempotency guard: if a milestone review action races with reconciliation and the
+  // milestone has already advanced out of `submitted`, skip the duplicate verify call.
+  if (command[0] === 'atel' && command[1] === 'milestone-verify' && command.length >= 4) {
+    const orderId = command[2];
+    const index = Number.parseInt(String(command[3]), 10);
+    if (orderId && Number.isFinite(index)) {
+      try {
+        const resp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(10000) });
+        if (resp.ok) {
+          const state = await resp.json();
+          const milestone = Array.isArray(state?.milestones) ? state.milestones.find((m) => m.index === index) : null;
+          if (milestone && milestone.status !== 'submitted') {
+            log({
+              event: 'recommended_action_direct_skip',
+              eventType,
+              dedupeKey,
+              action: action.action,
+              command,
+              reason: `milestone_status_${milestone.status}`,
+            });
+            return { ok: true, skipped: true, reason: `milestone_status_${milestone.status}` };
+          }
+        }
+      } catch (e) {
+        log({
+          event: 'recommended_action_direct_guard_error',
+          eventType,
+          dedupeKey,
+          action: action.action,
+          command,
+          error: e.message,
+        });
+      }
+    }
+  }
+
+  const { execFile } = await import('child_process');
+  const childCmd = command[0] === 'atel' ? process.execPath : command[0];
+  const childArgs = command[0] === 'atel' ? [process.argv[1], ...command.slice(1)] : command.slice(1);
+
+  log({ event: 'recommended_action_direct_trigger', eventType, dedupeKey, action: action.action, command });
+
+  return await new Promise((resolve) => {
+    execFile(childCmd, childArgs, { timeout: 180000, cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        log({
+          event: 'recommended_action_direct_error',
+          eventType,
+          dedupeKey,
+          action: action.action,
+          command,
+          error: err.message,
+          stderr: (stderr || '').substring(0, 400),
+        });
+        resolve({ ok: false, error: err.message });
+        return;
+      }
+
+      log({
+        event: 'recommended_action_direct_done',
+        eventType,
+        dedupeKey,
+        action: action.action,
+        command,
+        stdout: (stdout || '').substring(0, 400),
+      });
+      resolve({ ok: true, stdout });
+    });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -649,6 +736,36 @@ function parseCapabilitiesWithPricing(capString) {
 
 function loadPolicy() { if (!existsSync(POLICY_FILE)) return { ...DEFAULT_POLICY }; try { return { ...DEFAULT_POLICY, ...JSON.parse(readFileSync(POLICY_FILE, 'utf-8')) }; } catch { return { ...DEFAULT_POLICY }; } }
 function savePolicy(p) { ensureDir(); writeFileSync(POLICY_FILE, JSON.stringify(p, null, 2)); }
+function loadTrackedOrders() {
+  if (!existsSync(TRADE_TRACK_FILE)) return [];
+  try {
+    const data = JSON.parse(readFileSync(TRADE_TRACK_FILE, 'utf-8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+function saveTrackedOrders(orders) {
+  ensureDir();
+  writeFileSync(TRADE_TRACK_FILE, JSON.stringify(orders, null, 2));
+}
+function trackOrder(orderId, role) {
+  if (!orderId || !role) return;
+  const now = new Date().toISOString();
+  const orders = loadTrackedOrders().filter((o) => o && o.orderId);
+  const existing = orders.find((o) => o.orderId === orderId);
+  if (existing) {
+    existing.role = role;
+    existing.updatedAt = now;
+  } else {
+    orders.push({ orderId, role, updatedAt: now });
+  }
+  saveTrackedOrders(orders);
+}
+function untrackOrder(orderId) {
+  if (!orderId) return;
+  saveTrackedOrders(loadTrackedOrders().filter((o) => o?.orderId !== orderId));
+}
 function loadTasks() { if (!existsSync(TASKS_FILE)) return {}; try { return JSON.parse(readFileSync(TASKS_FILE, 'utf-8')); } catch { return {}; } }
 function saveTasks(t) { ensureDir(); writeFileSync(TASKS_FILE, JSON.stringify(t, null, 2)); }
 function loadNetwork() { if (!existsSync(NETWORK_FILE)) return null; try { return JSON.parse(readFileSync(NETWORK_FILE, 'utf-8')); } catch { return null; } }
@@ -2263,10 +2380,364 @@ async function cmdStart(port) {
 
   // ── Event dedup (processed eventIds) ──
   const processedEvents = new Set();
+  const pendingAgentCallbacks = new Map();
 
   // ── Agent hook queue (serialize hook executions to avoid session lock conflicts) ──
   let hookBusy = false;
   const hookQueue = [];
+  const activeRecoveryKeys = new Set();
+
+  endpoint.app?.post?.('/atel/v1/agent-callback', async (req, res) => {
+    const body = req.body || {};
+    const dedupeKey = body.dedupeKey;
+    const pending = dedupeKey ? pendingAgentCallbacks.get(dedupeKey) : null;
+    if (!pending) {
+      res.status(404).json({ error: 'Unknown dedupeKey' });
+      return;
+    }
+    log({
+      event: 'agent_callback_received',
+      eventType: pending.eventType,
+      dedupeKey,
+      status: body.status || 'done',
+      summary: body.summary,
+      error: body.error,
+      childSessionKey: pending.childSessionKey,
+    });
+
+    if (body.status === 'failed') {
+      pendingAgentCallbacks.delete(dedupeKey);
+      pending.resolve({ ok: false, body, error: body.error || 'agent_reported_failed' });
+      res.json({ status: 'ok' });
+      return;
+    }
+
+    const callbackAction = buildAgentCallbackAction(pending.eventType, pending.payload || {}, body);
+    if (callbackAction.skipped) {
+      pendingAgentCallbacks.delete(dedupeKey);
+      pending.resolve({ ok: true, skipped: true, body, reason: callbackAction.reason });
+      res.json({ status: 'ok', skipped: true });
+      return;
+    }
+    if (!callbackAction.ok) {
+      pendingAgentCallbacks.delete(dedupeKey);
+      pending.resolve({ ok: false, body, error: callbackAction.error || 'invalid_callback_payload' });
+      res.status(400).json({ error: callbackAction.error || 'invalid_callback_payload' });
+      return;
+    }
+
+    if (callbackAction.action?.type === 'local_result') {
+      try {
+        const localResp = await fetch(`http://127.0.0.1:${p}/atel/v1/result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskId: callbackAction.action.taskId,
+            result: callbackAction.action.result,
+            success: true,
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const localBody = await localResp.json().catch(() => ({}));
+        pendingAgentCallbacks.delete(dedupeKey);
+        pending.resolve({ ok: localResp.ok, body, action: callbackAction.action, localBody });
+        if (!localResp.ok) {
+          res.status(500).json({ error: localBody.error || 'local_result_callback_failed' });
+          return;
+        }
+        res.json({ status: 'ok' });
+        return;
+      } catch (e) {
+        pendingAgentCallbacks.delete(dedupeKey);
+        pending.resolve({ ok: false, body, action: callbackAction.action, error: e.message });
+        res.status(500).json({ error: e.message || 'local_result_callback_failed' });
+        return;
+      }
+    }
+
+    const execResult = await executeRecommendedActionDirect(pending.eventType, callbackAction.action, pending.cwd || process.cwd(), dedupeKey);
+    pendingAgentCallbacks.delete(dedupeKey);
+    pending.resolve({ ok: execResult.ok, body, action: callbackAction.action, execResult });
+    if (!execResult.ok) {
+      res.status(500).json({ error: execResult.error || 'callback_action_failed' });
+      return;
+    }
+    res.json({ status: 'ok' });
+  });
+
+  function buildGatewayCallbackPrompt(eventType, promptText, callbackUrl, dedupeKey, cwd) {
+    const callbackExamples = {
+      milestone_submitted: [
+        '通过时执行：',
+        "python3 - <<'PY'",
+        'import json, urllib.request',
+        `body = {"dedupeKey": "${dedupeKey}", "status": "done", "eventType": "${eventType}", "decision": "pass", "summary": "审核通过的简短原因"}`,
+        `req = urllib.request.Request("${callbackUrl}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})`,
+        'urllib.request.urlopen(req, timeout=10).read()',
+        'PY',
+        '',
+        '拒绝时执行：',
+        "python3 - <<'PY'",
+        'import json, urllib.request',
+        `body = {"dedupeKey": "${dedupeKey}", "status": "done", "eventType": "${eventType}", "decision": "reject", "reason": "具体拒绝原因", "summary": "简短审核结论"}`,
+        `req = urllib.request.Request("${callbackUrl}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})`,
+        'urllib.request.urlopen(req, timeout=10).read()',
+        'PY',
+      ].join('\n'),
+      default: [
+        "python3 - <<'PY'",
+        'import json, urllib.request',
+        `result = """在这里写最终交付内容"""`,
+        `body = {"dedupeKey": "${dedupeKey}", "status": "done", "eventType": "${eventType}", "result": result, "summary": result[:120]}`,
+        `req = urllib.request.Request("${callbackUrl}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})`,
+        'urllib.request.urlopen(req, timeout=10).read()',
+        'PY',
+      ].join('\n'),
+    };
+
+    const callbackFailed = [
+      "python3 - <<'PY'",
+      'import json, urllib.request',
+      `body = {"dedupeKey": "${dedupeKey}", "status": "failed", "eventType": "${eventType}", "error": "在这里写失败原因"}`,
+      `req = urllib.request.Request("${callbackUrl}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})`,
+      'urllib.request.urlopen(req, timeout=10).read()',
+      'PY',
+    ].join('\n');
+
+    const callbackDone = eventType === 'milestone_submitted' ? callbackExamples.milestone_submitted : callbackExamples.default;
+    if (eventType === 'p2p_task') {
+      return `${promptText}
+
+重要要求：
+1. 这是一个 P2P 任务。不要调用 atel result；本地 SDK 会在你回调后自动提交结果。
+2. 你的任务是认真完成 AI 工作，并把最终结论通过回调发回本地 SDK。
+3. 你可以在目录 ${cwd} 下阅读文件、运行分析命令、整理内容，但不要自己推进 ATEL 状态机。
+4. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
+
+${callbackDone}
+
+5. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
+
+${callbackFailed}
+`;
+    }
+
+    return `${promptText}
+
+重要要求：
+1. 不要执行 atel milestone-submit / milestone-verify / milestone-feedback 命令；这些命令会由本地 SDK 在你回调后代为执行。
+2. 你的任务是认真完成 AI 工作，并把最终结论通过回调发回本地 SDK。
+3. 你可以在目录 ${cwd} 下阅读文件、运行分析命令、整理内容，但最终不要自己推进 ATEL 状态机。
+4. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
+
+${callbackDone}
+
+5. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
+
+${callbackFailed}
+`;
+  }
+
+  async function runGatewayAgentTask(eventType, dedupeKey, promptText, cwd, payload) {
+    const gw = discoverGateway();
+    const cfg = loadOpenClawConfig();
+    const allow = cfg?.gateway?.tools?.allow;
+    if (!gw?.url || !gw?.token) return { ok: false, error: 'gateway_unavailable' };
+    if (Array.isArray(allow) && !allow.includes('sessions_spawn')) {
+      return { ok: false, error: 'sessions_spawn_not_allowed' };
+    }
+
+    const callbackUrl = `http://127.0.0.1:${p}/atel/v1/agent-callback`;
+    const taskPrompt = buildGatewayCallbackPrompt(eventType, promptText, callbackUrl, dedupeKey, cwd);
+    const timeoutMs = 10 * 60 * 1000;
+
+    return await new Promise(async (resolve) => {
+      const timer = setTimeout(() => {
+        pendingAgentCallbacks.delete(dedupeKey);
+        resolve({ ok: false, error: 'agent_callback_timeout' });
+      }, timeoutMs);
+
+      pendingAgentCallbacks.set(dedupeKey, {
+        eventType,
+        payload,
+        cwd,
+        childSessionKey: null,
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+      });
+
+      try {
+        const resp = await fetch(`${gw.url}/tools/invoke`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${gw.token}`,
+          },
+          body: JSON.stringify({
+            tool: 'sessions_spawn',
+            args: {
+              task: taskPrompt,
+              runTimeoutSeconds: Math.ceil(timeoutMs / 1000),
+            },
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!resp.ok) {
+          pendingAgentCallbacks.delete(dedupeKey);
+          clearTimeout(timer);
+          resolve({ ok: false, error: `sessions_spawn_http_${resp.status}` });
+          return;
+        }
+
+        const data = await resp.json();
+        const childSessionKey = data.result?.details?.childSessionKey || data.result?.childSessionKey || '';
+        const pending = pendingAgentCallbacks.get(dedupeKey);
+        if (pending) pending.childSessionKey = childSessionKey;
+        log({ event: 'agent_session_spawned', eventType, dedupeKey, childSessionKey });
+      } catch (e) {
+        pendingAgentCallbacks.delete(dedupeKey);
+        clearTimeout(timer);
+        resolve({ ok: false, error: e.message });
+      }
+    });
+  }
+
+  function queueAgentHook(eventType, dedupeKey, promptText, cwd, payload = {}, options = {}) {
+    if (!detectedAgentCmd || !promptText) return false;
+    const parsedCmd = detectedAgentCmd.trim().split(/\s+/);
+    parsedCmd.push(promptText);
+    const recoveryKey = options.recoveryKey || '';
+    if (recoveryKey) {
+      if (activeRecoveryKeys.has(recoveryKey)) return false;
+      activeRecoveryKeys.add(recoveryKey);
+    }
+    hookQueue.push({ event: eventType, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd, payload, recoveryKey });
+    if (!hookBusy) processHookQueue();
+    return true;
+  }
+
+  async function fetchMilestoneState(orderId) {
+    const resp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) throw new Error(`milestone_status_http_${resp.status}`);
+    return await resp.json();
+  }
+
+  async function fetchOrderState(orderId) {
+    const resp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}`, { signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) throw new Error(`order_info_http_${resp.status}`);
+    return await resp.json();
+  }
+
+  async function reconcileSingleTradeOrder(order) {
+    const orderId = order?.orderId || order?.OrderID;
+    if (!orderId) return;
+
+    const requesterDid = order?.requesterDid || order?.RequesterDID || '';
+    const executorDid = order?.executorDid || order?.ExecutorDID || '';
+    const orderStatus = order?.status || order?.Status || '';
+
+    if (['cancelled', 'settled', 'rejected', 'expired'].includes(orderStatus)) {
+      untrackOrder(orderId);
+      return;
+    }
+
+    if (orderStatus === 'milestone_review') {
+      const approveAction = { type: 'cli', action: 'approve_plan', command: ['atel', 'milestone-feedback', orderId, '--approve'] };
+      const result = await executeRecommendedActionDirect('order_accepted', approveAction, process.cwd(), `reconcile:${orderId}:approve_plan`);
+      log({ event: 'trade_reconcile_plan', orderId, ok: result.ok, role: requesterDid === id.did ? 'requester' : 'executor' });
+      return;
+    }
+
+    if (orderStatus !== 'executing') return;
+
+    const ms = await fetchMilestoneState(orderId);
+    if (ms.orderStatus !== 'executing') return;
+
+    if (executorDid === id.did && ms.phase === 'waiting_executor_submission') {
+      const currentIndex = Number.isFinite(ms.currentMilestone) ? ms.currentMilestone : 0;
+      const currentMilestone = (ms.milestones || []).find(m => m.index === currentIndex) || {};
+      const eventType = currentIndex === 0 ? 'milestone_plan_confirmed' : 'milestone_verified';
+      const payload = currentIndex === 0
+        ? {
+            orderId,
+            milestoneIndex: 0,
+            totalMilestones: ms.totalMilestones || 5,
+            milestoneDescription: currentMilestone.title || '',
+            orderDescription: '',
+          }
+        : {
+            orderId,
+            milestoneIndex: currentIndex - 1,
+            currentMilestone: currentIndex,
+            totalMilestones: ms.totalMilestones || 5,
+            allComplete: false,
+            nextMilestoneDescription: currentMilestone.title || '',
+            orderDescription: '',
+          };
+      const promptText = currentIndex === 0
+        ? `你是ATEL接单方Agent。双方已确认方案，开始执行。\n当前里程碑 M0：${currentMilestone.title || ''}\n请认真完成这个里程碑，并通过回调返回最终交付内容。`
+        : `你是ATEL接单方Agent。M${currentIndex - 1} 已通过审核。\n下一个里程碑 M${currentIndex}：${currentMilestone.title || ''}\n请认真完成这个里程碑，并通过回调返回最终交付内容。`;
+      const recoveryKey = `reconcile:${orderId}:executor:${currentIndex}`;
+      const queued = queueAgentHook(eventType, recoveryKey, promptText, process.cwd(), payload, { recoveryKey });
+      if (queued) log({ event: 'trade_reconcile_executor', orderId, currentMilestone: currentIndex, recoveryKey });
+      return;
+    }
+
+    if (requesterDid === id.did && ms.phase === 'waiting_requester_verification') {
+      const submittedMilestone = (ms.milestones || []).find(m => m.status === 'submitted');
+      if (!submittedMilestone) return;
+      const payload = {
+        orderId,
+        milestoneIndex: submittedMilestone.index,
+        milestoneDescription: submittedMilestone.title || '',
+        resultSummary: submittedMilestone.resultSummary || '',
+        submitCount: submittedMilestone.submitCount || 0,
+      };
+      const promptText = `你是ATEL发单方Agent，需要审核执行方提交的工作。\n里程碑目标：${submittedMilestone.title || ''}\n提交内容：${submittedMilestone.resultSummary || ''}\n请审慎决定通过还是拒绝，并通过回调返回 decision=pass 或 decision=reject。`;
+      const recoveryKey = `reconcile:${orderId}:requester:${submittedMilestone.index}:${submittedMilestone.submitCount || 0}`;
+      const queued = queueAgentHook('milestone_submitted', recoveryKey, promptText, process.cwd(), payload, { recoveryKey });
+      if (queued) log({ event: 'trade_reconcile_requester', orderId, milestoneIndex: submittedMilestone.index, recoveryKey });
+    }
+  }
+
+  async function reconcileActiveTradeOrders() {
+    const reconcileStatuses = ['milestone_review', 'executing'];
+    const seenOrderIds = new Set();
+    for (const status of reconcileStatuses) {
+      let listed;
+      try {
+        listed = await signedFetch('GET', `/trade/v1/orders?status=${encodeURIComponent(status)}`);
+      } catch (e) {
+        log({ event: 'trade_reconcile_list_error', status, error: e.message });
+        continue;
+      }
+      const orders = Array.isArray(listed?.orders) ? listed.orders : [];
+      for (const order of orders) {
+        try {
+          const orderId = order?.orderId;
+          if (!orderId) continue;
+          seenOrderIds.add(orderId);
+          await reconcileSingleTradeOrder(order);
+        } catch (e) {
+          log({ event: 'trade_reconcile_order_error', orderId: order?.orderId, status, error: e.message });
+        }
+      }
+    }
+
+    const trackedOrders = loadTrackedOrders();
+    for (const tracked of trackedOrders) {
+      const orderId = tracked?.orderId;
+      if (!orderId || seenOrderIds.has(orderId)) continue;
+      try {
+        const order = await fetchOrderState(orderId);
+        await reconcileSingleTradeOrder(order);
+      } catch (e) {
+        log({ event: 'trade_reconcile_tracked_error', orderId, error: e.message });
+      }
+    }
+  }
 
   // Webhook notification: POST /atel/v1/notify
   // SDK only: logs, writes inbox, prints prompt. Does NOT execute any actions.
@@ -2328,6 +2799,9 @@ async function cmdStart(port) {
       dedupeKey: body.dedupeKey,
     });
 
+    const dedupeKey = body.dedupeKey || `${event}:${body.orderId || payload.orderId || ''}`;
+    const cwd = process.cwd();
+
     // 3. Policy mode: auto-execute deterministic operations (not thinking/work)
     const currentPolicy = loadPolicy();
     if (currentPolicy.agentMode === 'policy') {
@@ -2385,18 +2859,31 @@ async function cmdStart(port) {
     // Uses .atel/notify-targets.json — auto-discovered, no manual config needed.
     pushTradeNotification(event, payload, body).catch(e => log({ event: 'trade_notify_error', error: e.message }));
 
-    // 4. Agent command hook: forward notification to agent's AI
-    // Skip order_created — accepting orders requires human confirmation
-    // Only auto-trigger for milestone-related events
+    // 4. Deterministic recommendedActions: execute directly instead of asking the chat agent
+    // to "say" it will run a command. This is the reliable path for state-transition actions
+    // such as approving the milestone plan on order acceptance.
+    let directExecutionSucceeded = false;
+    const directActions = getDirectExecutableActions(event, recommendedActions);
+    for (const action of directActions) {
+      const result = await executeRecommendedActionDirect(event, action, cwd, dedupeKey);
+      if (result.ok) directExecutionSucceeded = true;
+    }
+
+    // 5. Agent command hook: only for events that still need AI reasoning/work.
+    // Skip order_created — accepting orders requires human confirmation.
+    // Skip order_accepted if deterministic direct execution already succeeded.
     const agentCmd = detectedAgentCmd;
     const autoTriggerEvents = ['order_accepted', 'milestone_plan_confirmed', 'milestone_submitted', 'milestone_verified', 'milestone_rejected'];
-    if (agentCmd && prompt && autoTriggerEvents.includes(event)) {
+    const hasGatewayAction = Array.isArray(recommendedActions) && recommendedActions.some((action) => Array.isArray(action?.command) && action.command[0] === 'atel');
+    if (agentCmd && prompt && autoTriggerEvents.includes(event) && !shouldSkipAgentHook(event, directExecutionSucceeded)) {
+      if (shouldUseGatewaySession(event) && !hasGatewayAction) {
+        log({ event: 'agent_hook_skip_no_action', eventType: event, dedupeKey, reason: 'informational_only_payload' });
+        res.json({ status: 'received', eventId, eventType: event });
+        return;
+      }
       // Add working directory context so agent runs atel commands in the right place
-      const cwd = process.cwd();
       const cwdNote = `\n\n重要：所有 atel 命令必须在目录 ${cwd} 下执行（cd ${cwd} && atel ...）。`;
       const enrichedPrompt = prompt + cwdNote;
-      const fullPrompt = enrichedPrompt.replace(/'/g, "'\\''");
-      const dedupeKey = body.dedupeKey || `${event}:${body.orderId || ''}`;
 
       // Skip if already triggered for this dedupeKey
       if (processedEvents.has('hook:' + dedupeKey)) {
@@ -2409,7 +2896,7 @@ async function cmdStart(port) {
         parsedCmd.push(enrichedPrompt);
 
         // Queue the hook (serialize to avoid session lock conflicts)
-        hookQueue.push({ event, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd });
+        hookQueue.push({ event, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd, payload, recoveryKey: '' });
         if (!hookBusy) processHookQueue();
       }
     }
@@ -2421,9 +2908,25 @@ async function cmdStart(port) {
   async function processHookQueue() {
     if (hookBusy || hookQueue.length === 0) return;
     hookBusy = true;
-    const { event: hookEvent, dedupeKey: hookKey, cmd: spawnCmd, args: spawnArgs, cwd: hookCwd } = hookQueue.shift();
+    const { event: hookEvent, dedupeKey: hookKey, cmd: spawnCmd, args: spawnArgs, cwd: hookCwd, payload: hookPayload, recoveryKey } = hookQueue.shift();
     const { execFile } = await import('child_process');
+    const finishHook = () => {
+      if (recoveryKey) activeRecoveryKeys.delete(recoveryKey);
+      hookBusy = false;
+      processHookQueue();
+    };
     log({ event: 'agent_cmd_trigger', eventType: hookEvent, dedupeKey: hookKey, cmd: spawnCmd, argsCount: spawnArgs.length });
+
+    if (shouldUseGatewaySession(hookEvent)) {
+      const promptArg = spawnArgs[spawnArgs.length - 1] || '';
+      const gatewayResult = await runGatewayAgentTask(hookEvent, hookKey, promptArg, hookCwd, hookPayload);
+      if (gatewayResult.ok) {
+        log({ event: 'agent_cmd_done', eventType: hookEvent, mode: 'sessions_spawn', dedupeKey: hookKey });
+        finishHook();
+        return;
+      }
+      log({ event: 'agent_session_spawn_error', eventType: hookEvent, dedupeKey: hookKey, error: gatewayResult.error, fallback: 'cli' });
+    }
 
     const MAX_ATTEMPTS = 5;
     const runHook = (attempt) => {
@@ -2442,12 +2945,10 @@ async function cmdStart(port) {
           setTimeout(() => runHook(attempt + 1), 10000);
         } else if (err) {
           log({ event: 'agent_cmd_error', eventType: hookEvent, error: err.message, stderr: (stderr || '').substring(0, 200) });
-          hookBusy = false;
-          processHookQueue();
+          finishHook();
         } else {
           log({ event: 'agent_cmd_done', eventType: hookEvent, stdout: (stdout || '').substring(0, 300) });
-          hookBusy = false;
-          processHookQueue();
+          finishHook();
         }
       });
     };
@@ -3191,11 +3692,17 @@ async function cmdStart(port) {
     saveTasks(pendingTasks);
     log({ event: 'task_accepted', taskId, from: message.from, action, encrypted: !!session?.encrypted, relationship: accessCheck.relationship, timestamp: new Date().toISOString() });
 
-    // Forward to executor or echo
+    // Forward to executor, gateway session, or echo fallback
     if (EXECUTOR_URL) {
       fetch(EXECUTOR_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, from: message.from, action, payload, encrypted: !!session?.encrypted, toolProxy: `http://127.0.0.1:${toolProxyPort}` }) }).catch(e => log({ event: 'executor_forward_failed', taskId, error: e.message }));
       return { status: 'accepted', taskId, message: 'Task accepted. Result will be pushed when ready.' };
     } else {
+      const p2pPrompt = `你是 ATEL 接单方 Agent，收到一个 P2P 任务。\n任务类型：${action}\n任务内容：${JSON.stringify(payload?.payload || payload || {}, null, 2)}\n请认真完成任务，并通过回调返回最终结果。`;
+      const queued = queueAgentHook('p2p_task', `p2p:${taskId}`, p2pPrompt, process.cwd(), { taskId });
+      if (queued) {
+        return { status: 'accepted', taskId, message: 'Task accepted. Result will be pushed when ready.' };
+      }
+
       // Echo mode
       enforcer.taskFinished();
       const trace = new ExecutionTrace(taskId, id);
@@ -3293,6 +3800,11 @@ async function cmdStart(port) {
   flushResultPushQueue().catch((e) => log({ event: 'result_push_flush_error', error: e.message }));
   setInterval(() => {
     flushResultPushQueue().catch((e) => log({ event: 'result_push_flush_error', error: e.message }));
+  }, 15000);
+
+  reconcileActiveTradeOrders().catch((e) => log({ event: 'trade_reconcile_bootstrap_error', error: e.message }));
+  setInterval(() => {
+    reconcileActiveTradeOrders().catch((e) => log({ event: 'trade_reconcile_interval_error', error: e.message }));
   }, 15000);
 
   // Auto-register to Registry with candidates
@@ -4327,6 +4839,7 @@ async function cmdWithdraw(amount, address, chain) {
       address: address,
       chain: chain,
     });
+    if (data?.orderId) trackOrder(data.orderId, 'requester');
     console.log(JSON.stringify(data, null, 2));
   } catch (e) {
     // Fallback to legacy withdrawal
@@ -4492,12 +5005,22 @@ async function cmdOrderInfo(orderId) {
 async function cmdAccept(orderId) {
   if (!orderId) { console.error('Usage: atel accept <orderId>'); process.exit(1); }
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/accept`);
+  trackOrder(orderId, 'executor');
   console.log(JSON.stringify(data, null, 2));
 }
 
 async function cmdReject(orderId) {
   if (!orderId) { console.error('Usage: atel reject <orderId>'); process.exit(1); }
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/reject`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdOrderCancel(orderId, reason) {
+  if (!orderId) { console.error('Usage: atel order-cancel <orderId> [reason]'); process.exit(1); }
+  const data = await signedFetch('POST', `/trade/v1/order/${orderId}/cancel`, {
+    reason: reason || 'reset regression environment',
+  });
+  if (data?.status === 'cancelled') untrackOrder(orderId);
   console.log(JSON.stringify(data, null, 2));
 }
 
@@ -6477,6 +7000,7 @@ const commands = {
   // Trade
   'trade-task': () => cmdTradeTask(args[0], args.slice(1).join(' ')),
   order: () => cmdOrder(args[0], args[1], args[2]),
+  'order-cancel': () => cmdOrderCancel(args[0], args.slice(1).join(' ').trim()),
   'order-info': () => cmdOrderInfo(args[0]),
   accept: () => cmdAccept(args[0]),
   reject: () => _origCmdReject(args[0]),
@@ -6788,6 +7312,7 @@ Account Commands:
 Trade Commands:
   trade-task <cap> <desc> [--budget N]   One-shot: search → order → wait → confirm (requester)
   order <executorDid> <cap> <price>    Create a trade order
+  order-cancel <orderId> [reason]      Cancel an order
   order-info <orderId>                 Get order details
   accept <orderId>                     Accept an order (executor)
   reject <orderId>                     Reject an order (executor)

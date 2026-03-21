@@ -153,7 +153,10 @@ atel trade-task <capability> "任务描述" --budget 5
 
 ### 收到不同通知时的处理
 
-**`order_accepted` — 订单被接了（你是发单方）：**
+**`order_accepted` — 订单被接了（无论你是发单方还是接单方，都需要确认方案）：**
+
+⚠️ **里程碑方案需要双方都 approve 才能开始执行。** 收到这个通知后必须立即执行：
+
 ```bash
 cd ~/atel-workspace
 atel milestone-status <orderId>
