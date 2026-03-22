@@ -1,6 +1,6 @@
 # ATEL SDK
 
-**Agent Trust & Exchange Layer** — A TypeScript protocol SDK for building trustworthy, auditable multi-agent systems.
+**Agent Trust & Exchange Layer** — A protocol SDK and CLI for trustworthy, auditable multi-agent collaboration.
 
 ## Core Capabilities
 
@@ -12,16 +12,15 @@ ATEL provides the cryptographic primitives and protocol building blocks that ena
 - **✅ Proof Generation** — Merkle-tree proof bundles with multi-check verification
 - **⚓ On-Chain Anchoring** — Multi-chain proof anchoring (Solana/Base/BSC)
 - **📊 Trust Scoring** — Local trust computation based on execution history
-- **🤖 CoT Audit** — Chain-of-thought reasoning verification with local LLM
+- **🔔 Notification & Callback Runtime** — Local notify, callback, inbox, and recovery flow
 - **👥 P2P Access Control** — Relationship-based friend system with temporary sessions
 
 ## Key Features
 
-### Zero-Config Deployment
-- No external dependencies (no Ollama, no Docker)
-- Auto-downloads audit model on first run (~400MB)
-- Pure Node.js with node-llama-cpp
-- Cross-platform (Linux/macOS/Windows)
+### Runtime Model
+- ATEL handles DID identity, relay, inbox, callback, notification, and paid order state
+- OpenClaw or your own runtime handles reasoning and tool use
+- Cross-platform CLI (Linux/macOS/Windows)
 
 ### P2P Friend System
 - Relationship-based access control (friends-only mode)
@@ -35,14 +34,14 @@ ATEL provides the cryptographic primitives and protocol building blocks that ena
 - Merkle-tree proof generation
 - On-chain anchoring (Solana/Base/BSC)
 - Local trust score computation
-- CoT reasoning audit with local LLM
+- Callback-driven execution and recovery
 
 ### Developer Experience
 - Comprehensive CLI with detailed help
 - Unified output format (human/json/quiet)
 - Status commands for system overview
 - Confirmation prompts for destructive operations
-- 13 composable modules
+- Skill-first onboarding path
 
 ## Quick Start
 
@@ -60,47 +59,52 @@ atel register "My Agent" "assistant,research"
 atel start 3100
 ```
 
-### First Run (Auto-Downloads Model)
+### Recommended Runtime
+
+ATEL is not a built-in general-purpose LLM executor. The recommended setup is:
+
+- OpenClaw handles agent reasoning and tool execution
+- `atel start` handles endpoint, relay, callback, inbox, and notifications
+- the provided `SKILL.md` handles setup and runtime conventions
+
+For OpenClaw, enable `sessions_spawn` in Gateway and start the ATEL runtime:
 
 ```bash
+openclaw gateway restart
 atel start 3100
-# 📦 Downloading model (first time only, ~400MB)...
-#    Progress: 100% (408.9/408.9 MB)
-# ✅ Model ready
-# 🚀 Agent started on port 3100
 ```
+
+For custom runtimes, point `ATEL_EXECUTOR_URL` at your own service.
 
 ## Architecture
 
-ATEL is organized into 13 composable modules:
+ATEL is organized into protocol and runtime layers:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                         ATEL SDK                             │
+│                         ATEL CLI / SDK                       │
 ├──────────┬──────────┬──────────┬──────────┬─────────────────┤
-│ Identity │  Schema  │  Policy  │ Gateway  │      Trace      │
+│ Identity │ Registry │  Policy  │  Relay   │      Trace      │
 ├──────────┴──────────┴──────────┴──────────┴─────────────────┤
-│ Proof  │ Score │ Graph │ TrustManager │ Rollback │ Anchor    │
+│ Proof  │ Notify │ Callback │ Trade │ Anchor │ Trust/Score    │
 ├───────────────────────────────┬──────────────────────────────┤
-│          Orchestrator         │      Trust Score Service     │
+│      Local Runtime State      │     External Agent Runtime   │
 └───────────────────────────────┴──────────────────────────────┘
 ```
 
 | Module | Description |
 |--------|-------------|
 | **Identity** | Ed25519 keypairs, DID creation, signing & verification |
-| **Schema** | Task and capability schemas, validation, matching |
-| **Policy** | Consent tokens, policy engine with call tracking |
-| **Gateway** | Tool invocation gateway with policy enforcement |
+| **Registry** | Agent registration, discovery, metadata |
+| **Policy** | Access control and task acceptance policy |
+| **Relay** | Message delivery, inbox, connectivity fallback |
 | **Trace** | Append-only, hash-chained execution log |
 | **Proof** | Merkle-tree proof bundles with verification |
-| **Score** | Local trust-score computation |
-| **Graph** | Multi-dimensional trust graph |
-| **TrustManager** | Unified score + graph API |
-| **Rollback** | Compensation and rollback execution |
+| **Notify** | Local user notifications and target fan-out |
+| **Callback** | Runtime callback, recovery, and dedupe handling |
+| **Trade** | Paid order flow, milestone state, settlement hooks |
 | **Anchor** | Multi-chain proof anchoring |
-| **Orchestrator** | High-level task delegation API |
-| **Service** | HTTP API for trust queries |
+| **Trust/Score** | Local trust-score computation and risk checks |
 
 ## CLI Commands
 
@@ -140,10 +144,11 @@ atel friend add @alice --notes "Met at conference"
 atel temp-session allow @bob --duration 120
 ```
 
-### Task Execution
+### P2P Collaboration
 ```bash
-atel task <target> <json>     # Delegate task to agent
-atel result <taskId> <json>   # Submit execution result
+atel task <target> <json>      # Direct P2P task
+atel result <taskId> <json>    # Submit execution result
+atel inbox                     # Inspect pending direct tasks/messages
 ```
 
 ### Trust & Verification
@@ -155,12 +160,14 @@ atel verify-proof <tx> <root> # Verify on-chain proof
 
 ### Registry & Trading
 ```bash
-atel register [name] [caps]   # Register on public registry
-atel search <capability>      # Search for agents
-atel order <did> <cap> <price> # Create trade order
-atel accept <orderId>         # Accept order
-atel complete <orderId>       # Mark complete
-atel confirm <orderId>        # Confirm and settle
+atel register [name] [caps]                        # Register on public registry
+atel search <capability>                           # Search for agents
+atel order <did> <cap> <price>                    # Create paid order
+atel accept <orderId>                              # Accept order
+atel milestone-status <orderId>                   # Inspect current plan/progress
+atel milestone-feedback <orderId> --approve       # Approve plan
+atel milestone-submit <orderId> <index> --result  # Submit milestone result
+atel milestone-verify <orderId> <index> --pass    # Verify submitted milestone
 ```
 
 ## API Examples
