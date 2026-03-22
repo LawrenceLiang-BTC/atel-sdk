@@ -348,27 +348,53 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
     return { ok: false, skipped: true, reason: 'empty_command' };
   }
 
-  // Idempotency guard: if a milestone review action races with reconciliation and the
-  // milestone has already advanced out of `submitted`, skip the duplicate verify call.
-  if (command[0] === 'atel' && command[1] === 'milestone-verify' && command.length >= 4) {
+  // Idempotency guard: short-circuit duplicate milestone plan/submit/verify actions
+  // if the order or milestone has already advanced past the required state.
+  if (command[0] === 'atel' && (command[1] === 'milestone-feedback' || command[1] === 'milestone-verify' || command[1] === 'milestone-submit') && command.length >= 3) {
     const orderId = command[2];
-    const index = Number.parseInt(String(command[3]), 10);
-    if (orderId && Number.isFinite(index)) {
+    const needsMilestoneIndex = command[1] === 'milestone-verify' || command[1] === 'milestone-submit';
+    const index = needsMilestoneIndex ? Number.parseInt(String(command[3]), 10) : null;
+    if (orderId && (!needsMilestoneIndex || Number.isFinite(index))) {
       try {
         const resp = await fetch(`${PLATFORM_URL}/trade/v1/order/${orderId}/milestones`, { signal: AbortSignal.timeout(10000) });
         if (resp.ok) {
           const state = await resp.json();
-          const milestone = Array.isArray(state?.milestones) ? state.milestones.find((m) => m.index === index) : null;
-          if (milestone && milestone.status !== 'submitted') {
+          if (command[1] === 'milestone-feedback' && command.includes('--approve') && state?.orderStatus && state.orderStatus !== 'milestone_review') {
             log({
               event: 'recommended_action_direct_skip',
               eventType,
               dedupeKey,
               action: action.action,
               command,
-              reason: `milestone_status_${milestone.status}`,
+              reason: `order_status_${state.orderStatus}`,
             });
-            return { ok: true, skipped: true, reason: `milestone_status_${milestone.status}` };
+            return { ok: true, skipped: true, reason: `order_status_${state.orderStatus}` };
+          }
+          if (command[1] === 'milestone-submit' && state?.orderStatus && state.orderStatus !== 'executing') {
+            log({
+              event: 'recommended_action_direct_skip',
+              eventType,
+              dedupeKey,
+              action: action.action,
+              command,
+              reason: `order_status_${state.orderStatus}`,
+            });
+            return { ok: true, skipped: true, reason: `order_status_${state.orderStatus}` };
+          }
+          const milestone = needsMilestoneIndex && Array.isArray(state?.milestones) ? state.milestones.find((m) => m.index === index) : null;
+          if (needsMilestoneIndex && milestone) {
+            const expectedStatus = command[1] === 'milestone-verify' ? 'submitted' : 'pending';
+            if (milestone.status !== expectedStatus) {
+              log({
+                event: 'recommended_action_direct_skip',
+                eventType,
+                dedupeKey,
+                action: action.action,
+                command,
+                reason: `milestone_status_${milestone.status}`,
+              });
+              return { ok: true, skipped: true, reason: `milestone_status_${milestone.status}` };
+            }
           }
         }
       } catch (e) {
