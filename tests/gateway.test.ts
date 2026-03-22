@@ -169,7 +169,7 @@ describe('gateway', () => {
   });
 
   describe('RealHttpTool', () => {
-    it('should perform a real GET request', async () => {
+    it('should perform a real GET request', { timeout: 15000 }, async () => {
       const result = await RealHttpTool.get('https://jsonplaceholder.typicode.com/posts/1');
       expect(result.status).toBe(200);
       expect(result.body).toBeDefined();
@@ -177,7 +177,7 @@ describe('gateway', () => {
       expect(result.headers).toBeDefined();
     });
 
-    it('should perform a real POST request', async () => {
+    it('should perform a real POST request', { timeout: 15000 }, async () => {
       const result = await RealHttpTool.post(
         'https://jsonplaceholder.typicode.com/posts',
         { title: 'test', body: 'hello', userId: 1 },
@@ -187,7 +187,7 @@ describe('gateway', () => {
       expect((result.body as any).title).toBe('test');
     });
 
-    it('should pass custom headers on GET', async () => {
+    it('should pass custom headers on GET', { timeout: 15000 }, async () => {
       const result = await RealHttpTool.get(
         'https://jsonplaceholder.typicode.com/posts/1',
         { 'Accept': 'application/json' },
@@ -195,7 +195,7 @@ describe('gateway', () => {
       expect(result.status).toBe(200);
     });
 
-    it('should register on a ToolGateway and work via callTool', async () => {
+    it('should register on a ToolGateway and work via callTool', { timeout: 15000 }, async () => {
       const gw = new ToolGateway(makeAllowPolicy());
       RealHttpTool.register(gw);
 
