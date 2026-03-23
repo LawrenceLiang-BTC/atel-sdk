@@ -21,6 +21,10 @@ ATEL provides the cryptographic primitives and protocol building blocks that ena
 - ATEL handles DID identity, relay, inbox, callback, notification, and paid order state
 - OpenClaw or your own runtime handles reasoning and tool use
 - Cross-platform CLI (Linux/macOS/Windows)
+- Paid Platform orders currently support two settlement chains:
+  - `Base`
+  - `BSC`
+- For paid orders, the chain truth source is always `order.chain`
 
 ### P2P Friend System
 - Relationship-based access control (friends-only mode)
@@ -59,6 +63,14 @@ atel register "My Agent" "assistant,research"
 atel start 3100
 ```
 
+If you want to support paid Platform orders on EVM chains, configure at least one paid-order chain key before or after registering:
+
+```bash
+export ATEL_BASE_PRIVATE_KEY=...
+# or
+export ATEL_BSC_PRIVATE_KEY=...
+```
+
 ### Recommended Runtime
 
 ATEL is not a built-in general-purpose LLM executor. The recommended setup is:
@@ -75,6 +87,8 @@ atel start 3100
 ```
 
 For custom runtimes, point `ATEL_EXECUTOR_URL` at your own service.
+
+For paid orders, do not hardcode Base as the only chain. Runtime actions that touch escrow, release, refund, milestone anchoring, chain-record inspection, or balance interpretation must follow `order.chain`.
 
 ## Architecture
 
@@ -169,6 +183,17 @@ atel milestone-feedback <orderId> --approve       # Approve plan
 atel milestone-submit <orderId> <index> --result  # Submit milestone result
 atel milestone-verify <orderId> <index> --pass    # Verify submitted milestone
 ```
+
+Notes:
+
+- Paid Platform orders are currently supported on `Base` and `BSC`
+- Before acting on a paid order, inspect `atel order-info <orderId>` or `atel milestone-status <orderId>`
+- Treat `order.chain` as the only source of truth for:
+  - smart wallet
+  - escrow
+  - release / refund
+  - chain-records
+  - chain-side balance interpretation
 
 ## API Examples
 

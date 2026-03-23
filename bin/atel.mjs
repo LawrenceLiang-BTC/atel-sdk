@@ -52,7 +52,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
 import crypto from 'node:crypto';
 import {
   AgentIdentity, AgentEndpoint, AgentClient, HandshakeManager,
@@ -91,6 +91,7 @@ const NOTIFY_TARGETS_FILE = resolve(ATEL_DIR, 'notify-targets.json');
 const TRADE_TRACK_FILE = resolve(ATEL_DIR, 'tracked-orders.json');
 const P2P_STATUS_FILE = resolve(ATEL_DIR, 'p2p-task-status.jsonl');
 const PENDING_AGENT_CALLBACKS_FILE = resolve(ATEL_DIR, 'pending-agent-callbacks.json');
+const ORDER_WORK_DIR = resolve(ATEL_DIR, 'order-workspaces');
 const KEYS_DIR = resolve(ATEL_DIR, 'keys');
 const ANCHOR_FILE = resolve(KEYS_DIR, 'anchor.json');
 
@@ -99,6 +100,97 @@ const DEFAULT_POLICY = { rateLimit: 60, maxPayloadBytes: 1048576, maxConcurrent:
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function ensureDir() { if (!existsSync(ATEL_DIR)) mkdirSync(ATEL_DIR, { recursive: true }); }
+
+function ensureOrderWorkspace(orderId, context = {}) {
+  ensureDir();
+  const safeOrderId = String(orderId || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dir = resolve(ORDER_WORK_DIR, safeOrderId);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const contextFile = join(dir, 'ORDER_CONTEXT.md');
+  const lines = [
+    `# ATEL Order Context`,
+    ``,
+    `Order ID: ${orderId || ''}`,
+    `Chain: ${context.chain || ''}`,
+    `Role: ${context.role || ''}`,
+    `Status: ${context.status || ''}`,
+    `Phase: ${context.phase || ''}`,
+    `Current Milestone: ${context.currentMilestone ?? ''}`,
+    `Milestone Title: ${context.milestoneTitle || ''}`,
+    ``,
+    `## Order Description`,
+    context.orderDescription || '',
+    ``,
+    `## Milestone Objective`,
+    context.milestoneObjective || '',
+    ``,
+    `## Submission Content`,
+    context.resultSummary || '',
+    ``,
+    `## Previous Approved Outputs`,
+    context.previousApprovedOutputs || '',
+    ``,
+    `## Hard Rules`,
+    `- Only work from the order description and milestone objective in this file.`,
+    `- Do not inspect unrelated local projects or repository content unless the order explicitly asks for repo analysis.`,
+    `- Do not infer a different project from stray files in the machine workspace.`,
+    `- Return only content that directly satisfies this order.`,
+    ``,
+  ];
+  writeFileSync(contextFile, lines.join('\n'));
+  return { dir, contextFile };
+}
+
+function getOrderWorkspace(orderId, context = {}) {
+  if (!orderId) return { dir: process.cwd(), contextFile: '' };
+  return ensureOrderWorkspace(orderId, context);
+}
+
+function getAtelWorkspaceRoot() {
+  return dirname(ATEL_DIR);
+}
+
+function shouldAllowRepoAccess(context = {}) {
+  const description = String(context?.orderDescription || '').toLowerCase();
+  const objective = String(context?.milestoneObjective || '').toLowerCase();
+  const resultSummary = String(context?.resultSummary || '').toLowerCase();
+  const previousApprovedOutputs = String(context?.previousApprovedOutputs || '').toLowerCase();
+  const combined = `${description}\n${objective}\n${resultSummary}\n${previousApprovedOutputs}`;
+  return /(repo|repository|codebase|仓库|代码库|项目代码|source code|read files|analyze code|修改代码|修复代码|实现功能)/i.test(combined);
+}
+
+function summarizeApprovedMilestones(milestones = [], beforeIndex = Number.MAX_SAFE_INTEGER) {
+  return (Array.isArray(milestones) ? milestones : [])
+    .filter((m) => m && m.status === 'verified' && Number.isFinite(m.index) && m.index < beforeIndex)
+    .sort((a, b) => a.index - b.index)
+    .map((m) => `M${m.index}: ${m.title || ''}\nResult: ${m.resultSummary || ''}`.trim())
+    .join('\n\n');
+}
+
+function sanitizeAgentPrompt(promptText, meta = {}) {
+  const raw = typeof promptText === 'string' ? promptText : '';
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    log({ event: 'agent_prompt_skip_empty', eventType: meta.eventType || 'unknown', dedupeKey: meta.dedupeKey || '' });
+    return '';
+  }
+
+  // Keep a large but bounded margin below upstream model limits. We only need
+  // concise task prompts here; oversized prompts add noise and can trigger
+  // upstream length validation errors.
+  const maxChars = 16000;
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const truncated = `${trimmed.slice(0, maxChars)}\n\n[Prompt truncated by ATEL SDK to stay within model input limits.]`;
+  log({
+    event: 'agent_prompt_truncated',
+    eventType: meta.eventType || 'unknown',
+    dedupeKey: meta.dedupeKey || '',
+    originalChars: trimmed.length,
+    finalChars: truncated.length,
+  });
+  return truncated;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Notification Target System — auto-discover gateway, manage targets
@@ -414,11 +506,12 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
   const { execFile } = await import('child_process');
   const childCmd = command[0] === 'atel' ? process.execPath : command[0];
   const childArgs = command[0] === 'atel' ? [process.argv[1], ...command.slice(1)] : command.slice(1);
+  const childCwd = command[0] === 'atel' ? getAtelWorkspaceRoot() : cwd;
 
   log({ event: 'recommended_action_direct_trigger', eventType, dedupeKey, action: action.action, command });
 
   return await new Promise((resolve) => {
-    execFile(childCmd, childArgs, { timeout: 180000, cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(childCmd, childArgs, { timeout: 180000, cwd: childCwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         log({
           event: 'recommended_action_direct_error',
@@ -2574,7 +2667,9 @@ async function cmdStart(port) {
           return;
         }
       }
-      res.status(404).json({ error: 'Unknown dedupeKey' });
+      // Treat late/duplicate/expired callbacks as idempotent skips rather than hard errors.
+      // The callback source has already completed, timed out, or been recovered elsewhere.
+      res.json({ status: 'ok', skipped: true, reason: 'unknown_or_expired_dedupeKey' });
       return;
     }
     log({
@@ -2588,6 +2683,67 @@ async function cmdStart(port) {
     });
 
     if (body.status === 'failed') {
+      // Some subagents pessimistically send `failed` after already producing a usable
+      // summary/result because they observed a callback transport error on their side.
+      // If the payload is still actionable, recover it here instead of dropping the flow.
+      const failedAction = buildAgentCallbackAction(pending.eventType, pending.payload || {}, body);
+      if (failedAction.ok && !failedAction.skipped) {
+        log({
+          event: 'agent_callback_failed_recovered',
+          eventType: pending.eventType,
+          dedupeKey,
+          childSessionKey: pending.childSessionKey,
+          summary: body.summary,
+          error: body.error,
+        });
+
+        if (failedAction.action?.type === 'local_result') {
+          try {
+            const localResp = await fetch(`http://127.0.0.1:${p}/atel/v1/result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                taskId: failedAction.action.taskId,
+                result: failedAction.action.result,
+                success: true,
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
+            const localBody = await localResp.json().catch(() => ({}));
+            pendingAgentCallbacks.delete(dedupeKey);
+            if (localResp.ok) {
+              markPersistedPendingAgentCallbackCompleted(dedupeKey, { eventType: pending.eventType, payload: pending.payload, cwd: pending.cwd, source: dedupeKey?.startsWith('reconcile:') ? 'reconcile' : 'main', action: failedAction.action, localBody, recoveredFromFailed: true });
+              pending.resolve({ ok: true, recovered: true, body, action: failedAction.action, localBody });
+              res.json({ status: 'ok', recovered: true });
+              return;
+            }
+            clearPersistedPendingAgentCallback(dedupeKey);
+            pending.resolve({ ok: false, body, action: failedAction.action, localBody, error: localBody.error || 'local_result_callback_failed' });
+            res.status(500).json({ error: localBody.error || 'local_result_callback_failed' });
+            return;
+          } catch (e) {
+            pendingAgentCallbacks.delete(dedupeKey);
+            clearPersistedPendingAgentCallback(dedupeKey);
+            pending.resolve({ ok: false, body, action: failedAction.action, error: e.message });
+            res.status(500).json({ error: e.message || 'local_result_callback_failed' });
+            return;
+          }
+        }
+
+        const execResult = await executeRecommendedActionDirect(pending.eventType, failedAction.action, pending.cwd || process.cwd(), dedupeKey);
+        pendingAgentCallbacks.delete(dedupeKey);
+        if (execResult.ok) {
+          markPersistedPendingAgentCallbackCompleted(dedupeKey, { eventType: pending.eventType, payload: pending.payload, cwd: pending.cwd, source: dedupeKey?.startsWith('reconcile:') ? 'reconcile' : 'main', action: failedAction.action, recoveredFromFailed: true });
+          pending.resolve({ ok: true, recovered: true, body, action: failedAction.action, execResult });
+          res.json({ status: 'ok', recovered: true });
+          return;
+        }
+        clearPersistedPendingAgentCallback(dedupeKey);
+        pending.resolve({ ok: false, body, action: failedAction.action, execResult, error: execResult.error || 'callback_action_failed' });
+        res.status(500).json({ error: execResult.error || 'callback_action_failed' });
+        return;
+      }
+
       pendingAgentCallbacks.delete(dedupeKey);
       clearPersistedPendingAgentCallback(dedupeKey);
       pending.resolve({ ok: false, body, error: body.error || 'agent_reported_failed' });
@@ -2661,7 +2817,7 @@ async function cmdStart(port) {
     res.json({ status: 'ok' });
   });
 
-  function buildGatewayCallbackPrompt(eventType, promptText, callbackUrl, dedupeKey, cwd) {
+  function buildGatewayCallbackPrompt(eventType, promptText, callbackUrl, dedupeKey, cwd, payload = {}) {
     const callbackExamples = {
       milestone_submitted: [
         '通过时执行：',
@@ -2701,18 +2857,30 @@ async function cmdStart(port) {
     ].join('\n');
 
     const callbackDone = eventType === 'milestone_submitted' ? callbackExamples.milestone_submitted : callbackExamples.default;
+    const contextFile = join(cwd, 'ORDER_CONTEXT.md');
+    const allowRepoAccess = shouldAllowRepoAccess(payload);
+    const fileAccessRule = allowRepoAccess
+      ? `3. 仅允许使用目录 ${cwd} 下与当前订单直接相关的内容；如果订单明确要求读仓库，也只能读取该订单工作区中明确提供的路径。`
+      : `3. 本单禁止读取任何本地文件、共享草稿、仓库或其他项目。不要使用文件搜索、目录浏览、读文件等方式扩展上下文；只允许依据本条消息中的订单描述、里程碑目标、提交内容来工作。`;
+    const contextRule = allowRepoAccess
+      ? `4. 优先读取 ${contextFile}，严格以其中的订单描述、里程碑目标、提交内容为准。`
+      : `4. 不要扫描本机其他目录，不要读取 /root/atel-workspace 下的共享文件，不要根据历史项目或 stray files 推断任务。`;
+    const repoRule = allowRepoAccess
+      ? `5. 只有当订单明确要求分析仓库/代码时，才允许读取订单工作区里显式提供的代码路径；禁止顺带读取其他目录。`
+      : `5. 本单不是 repo/code 任务。禁止把任务扩展成代码分析、工程改造或共享草稿筛选。`;
     if (eventType === 'p2p_task') {
       return `${promptText}
 
 重要要求：
 1. 这是一个 P2P 任务。不要调用 atel result；本地 SDK 会在你回调后自动提交结果。
 2. 你的任务是认真完成 AI 工作，并把最终结论通过回调发回本地 SDK。
-3. 你可以在目录 ${cwd} 下阅读文件、运行分析命令、整理内容，但不要自己推进 ATEL 状态机。
-4. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
+${fileAccessRule}
+${contextRule}
+5. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
 
 ${callbackDone}
 
-5. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
+6. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
 
 ${callbackFailed}
 `;
@@ -2723,12 +2891,14 @@ ${callbackFailed}
 重要要求：
 1. 不要执行 atel milestone-submit / milestone-verify / milestone-feedback 命令；这些命令会由本地 SDK 在你回调后代为执行。
 2. 你的任务是认真完成 AI 工作，并把最终结论通过回调发回本地 SDK。
-3. 你可以在目录 ${cwd} 下阅读文件、运行分析命令、整理内容，但最终不要自己推进 ATEL 状态机。
-4. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
+${fileAccessRule}
+${contextRule}
+${repoRule}
+6. 完成后，必须立刻执行下面这个成功回调命令模板，并把其中内容替换成你的真实结果：
 
 ${callbackDone}
 
-5. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
+7. 如果重试后仍然失败，也必须执行下面这个失败回调命令：
 
 ${callbackFailed}
 `;
@@ -2744,7 +2914,9 @@ ${callbackFailed}
     }
 
     const callbackUrl = `http://127.0.0.1:${p}/atel/v1/agent-callback`;
-    const taskPrompt = buildGatewayCallbackPrompt(eventType, promptText, callbackUrl, dedupeKey, cwd);
+    const safePrompt = sanitizeAgentPrompt(promptText, { eventType, dedupeKey });
+    if (!safePrompt) return { ok: false, error: 'empty_agent_prompt' };
+    const taskPrompt = buildGatewayCallbackPrompt(eventType, safePrompt, callbackUrl, dedupeKey, cwd, payload);
     const timeoutMs = 10 * 60 * 1000;
 
     return await new Promise(async (resolve) => {
@@ -2810,9 +2982,11 @@ ${callbackFailed}
   }
 
   function queueAgentHook(eventType, dedupeKey, promptText, cwd, payload = {}, options = {}) {
-    if (!detectedAgentCmd || !promptText) return false;
+    if (!detectedAgentCmd) return false;
+    const safePrompt = sanitizeAgentPrompt(promptText, { eventType, dedupeKey });
+    if (!safePrompt) return false;
     const parsedCmd = detectedAgentCmd.trim().split(/\s+/);
-    parsedCmd.push(promptText);
+    parsedCmd.push(safePrompt);
     const recoveryKey = options.recoveryKey || '';
     if (recoveryKey) {
       if (activeRecoveryKeys.has(recoveryKey)) return false;
@@ -2842,6 +3016,8 @@ ${callbackFailed}
     const requesterDid = order?.requesterDid || order?.RequesterDID || '';
     const executorDid = order?.executorDid || order?.ExecutorDID || '';
     const orderStatus = order?.status || order?.Status || '';
+    const orderDescription = order?.description || order?.Description || order?.taskRequest?.description || order?.TaskRequest?.description || '';
+    const chain = order?.chain || order?.Chain || '';
 
     if (['cancelled', 'settled', 'rejected', 'expired'].includes(orderStatus)) {
       untrackOrder(orderId);
@@ -2850,7 +3026,7 @@ ${callbackFailed}
 
     if (orderStatus === 'milestone_review') {
       const approveAction = { type: 'cli', action: 'approve_plan', command: ['atel', 'milestone-feedback', orderId, '--approve'] };
-      const result = await executeRecommendedActionDirect('order_accepted', approveAction, process.cwd(), `reconcile:${orderId}:approve_plan`);
+      const result = await executeRecommendedActionDirect('order_accepted', approveAction, getAtelWorkspaceRoot(), `reconcile:${orderId}:approve_plan`);
       log({ event: 'trade_reconcile_plan', orderId, ok: result.ok, role: requesterDid === id.did ? 'requester' : 'executor' });
       return;
     }
@@ -2863,6 +3039,18 @@ ${callbackFailed}
     if (executorDid === id.did && ms.phase === 'waiting_executor_submission') {
       const currentIndex = Number.isFinite(ms.currentMilestone) ? ms.currentMilestone : 0;
       const currentMilestone = (ms.milestones || []).find(m => m.index === currentIndex) || {};
+      const previousApprovedOutputs = summarizeApprovedMilestones(ms.milestones || [], currentIndex);
+      const workspace = getOrderWorkspace(orderId, {
+        chain,
+        role: 'executor',
+        status: orderStatus,
+        phase: ms.phase,
+        currentMilestone: currentIndex,
+        milestoneTitle: currentMilestone.title || '',
+        orderDescription,
+        milestoneObjective: currentMilestone.title || '',
+        previousApprovedOutputs,
+      });
       const eventType = currentIndex === 0 ? 'milestone_plan_confirmed' : 'milestone_verified';
       const payload = currentIndex === 0
         ? {
@@ -2870,7 +3058,8 @@ ${callbackFailed}
             milestoneIndex: 0,
             totalMilestones: ms.totalMilestones || 5,
             milestoneDescription: currentMilestone.title || '',
-            orderDescription: '',
+            orderDescription,
+            previousApprovedOutputs,
           }
         : {
             orderId,
@@ -2879,13 +3068,14 @@ ${callbackFailed}
             totalMilestones: ms.totalMilestones || 5,
             allComplete: false,
             nextMilestoneDescription: currentMilestone.title || '',
-            orderDescription: '',
+            orderDescription,
+            previousApprovedOutputs,
           };
       const promptText = currentIndex === 0
-        ? `你是ATEL接单方Agent。双方已确认方案，开始执行。\n当前里程碑 M0：${currentMilestone.title || ''}\n请认真完成这个里程碑，并通过回调返回最终交付内容。`
-        : `你是ATEL接单方Agent。M${currentIndex - 1} 已通过审核。\n下一个里程碑 M${currentIndex}：${currentMilestone.title || ''}\n请认真完成这个里程碑，并通过回调返回最终交付内容。`;
+        ? `你是ATEL接单方Agent。双方已确认方案，开始执行。\n订单原始要求：${orderDescription || '未提供'}\n当前里程碑 M0：${currentMilestone.title || ''}\n请只围绕这个订单要求完成当前里程碑，并通过回调返回最终交付内容。`
+        : `你是ATEL接单方Agent。M${currentIndex - 1} 已通过审核。\n订单原始要求：${orderDescription || '未提供'}\n下一个里程碑 M${currentIndex}：${currentMilestone.title || ''}\n前面已通过的阶段结果如下：\n${previousApprovedOutputs || '无'}\n\n请严格基于这些已通过结果推进当前里程碑，不要自行假设缺失材料，也不要读取本地共享文件来补上下文。完成后通过回调返回最终交付内容。`;
       const recoveryKey = `reconcile:${orderId}:executor:${currentIndex}`;
-      const queued = queueAgentHook(eventType, recoveryKey, promptText, process.cwd(), payload, { recoveryKey });
+      const queued = queueAgentHook(eventType, recoveryKey, promptText, workspace.dir, payload, { recoveryKey });
       if (queued) log({ event: 'trade_reconcile_executor', orderId, currentMilestone: currentIndex, recoveryKey });
       return;
     }
@@ -2893,16 +3083,31 @@ ${callbackFailed}
     if (requesterDid === id.did && ms.phase === 'waiting_requester_verification') {
       const submittedMilestone = (ms.milestones || []).find(m => m.status === 'submitted');
       if (!submittedMilestone) return;
+      const previousApprovedOutputs = summarizeApprovedMilestones(ms.milestones || [], submittedMilestone.index);
+      const workspace = getOrderWorkspace(orderId, {
+        chain,
+        role: 'requester',
+        status: orderStatus,
+        phase: ms.phase,
+        currentMilestone: submittedMilestone.index,
+        milestoneTitle: submittedMilestone.title || '',
+        orderDescription,
+        milestoneObjective: submittedMilestone.title || '',
+        resultSummary: submittedMilestone.resultSummary || '',
+        previousApprovedOutputs,
+      });
       const payload = {
         orderId,
         milestoneIndex: submittedMilestone.index,
         milestoneDescription: submittedMilestone.title || '',
         resultSummary: submittedMilestone.resultSummary || '',
         submitCount: submittedMilestone.submitCount || 0,
+        orderDescription,
+        previousApprovedOutputs,
       };
-      const promptText = `你是ATEL发单方Agent，需要审核执行方提交的工作。\n里程碑目标：${submittedMilestone.title || ''}\n提交内容：${submittedMilestone.resultSummary || ''}\n请审慎决定通过还是拒绝，并通过回调返回 decision=pass 或 decision=reject。`;
+      const promptText = `你是ATEL发单方Agent，需要审核执行方提交的工作。\n订单原始要求：${orderDescription || '未提供'}\n里程碑目标：${submittedMilestone.title || ''}\n前面已通过的阶段结果如下：\n${previousApprovedOutputs || '无'}\n提交内容：${submittedMilestone.resultSummary || ''}\n请只按该订单要求和前序已通过结果审慎决定通过还是拒绝，并通过回调返回 decision=pass 或 decision=reject。`;
       const recoveryKey = `reconcile:${orderId}:requester:${submittedMilestone.index}:${submittedMilestone.submitCount || 0}`;
-      const queued = queueAgentHook('milestone_submitted', recoveryKey, promptText, process.cwd(), payload, { recoveryKey });
+      const queued = queueAgentHook('milestone_submitted', recoveryKey, promptText, workspace.dir, payload, { recoveryKey });
       if (queued) log({ event: 'trade_reconcile_requester', orderId, milestoneIndex: submittedMilestone.index, recoveryKey });
     }
   }
@@ -3005,7 +3210,20 @@ ${callbackFailed}
     });
 
     const dedupeKey = body.dedupeKey || `${event}:${body.orderId || payload.orderId || ''}`;
-    const cwd = process.cwd();
+    const orderIdForCwd = body.orderId || payload.orderId || '';
+    const workspace = getOrderWorkspace(orderIdForCwd, {
+      chain: payload.chain || body.chain || '',
+      role: payload.executorDid === id.did ? 'executor' : (payload.requesterDid === id.did ? 'requester' : ''),
+      status: payload.orderStatus || body.orderStatus || '',
+      phase: payload.phase || body.phase || '',
+      currentMilestone: payload.currentMilestone ?? payload.milestoneIndex ?? '',
+      milestoneTitle: payload.milestoneDescription || payload.nextMilestoneDescription || '',
+      orderDescription: payload.orderDescription || payload.description || '',
+      milestoneObjective: payload.milestoneDescription || payload.nextMilestoneDescription || '',
+      resultSummary: payload.resultSummary || '',
+    });
+    const hookCwd = workspace.dir;
+    const atelCwd = getAtelWorkspaceRoot();
 
     // 3. Policy mode: auto-execute deterministic operations (not thinking/work)
     const currentPolicy = loadPolicy();
@@ -3070,7 +3288,7 @@ ${callbackFailed}
     let directExecutionSucceeded = false;
     const directActions = getDirectExecutableActions(event, recommendedActions);
     for (const action of directActions) {
-      const result = await executeRecommendedActionDirect(event, action, cwd, dedupeKey);
+      const result = await executeRecommendedActionDirect(event, action, atelCwd, dedupeKey);
       if (result.ok) directExecutionSucceeded = true;
     }
 
@@ -3087,8 +3305,12 @@ ${callbackFailed}
         return;
       }
       // Add working directory context so agent runs atel commands in the right place
-      const cwdNote = `\n\n重要：所有 atel 命令必须在目录 ${cwd} 下执行（cd ${cwd} && atel ...）。`;
-      const enrichedPrompt = prompt + cwdNote;
+      const cwdNote = `\n\n重要：OpenClaw 的分析工作目录是 ${hookCwd}。所有 atel 命令必须在目录 ${atelCwd} 下执行（cd ${atelCwd} && atel ...）。`;
+      const enrichedPrompt = sanitizeAgentPrompt(prompt + cwdNote, { eventType: event, dedupeKey });
+      if (!enrichedPrompt) {
+        res.json({ status: 'received', eventId, eventType: event, skipped: true });
+        return;
+      }
 
       // Skip if already triggered for this dedupeKey
       if (processedEvents.has('hook:' + dedupeKey)) {
@@ -3101,7 +3323,7 @@ ${callbackFailed}
         parsedCmd.push(enrichedPrompt);
 
         // Queue the hook (serialize to avoid session lock conflicts)
-        hookQueue.push({ event, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd, payload, recoveryKey: '' });
+        hookQueue.push({ event, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd: hookCwd, payload, recoveryKey: '' });
         if (!hookBusy) processHookQueue();
       }
     }
