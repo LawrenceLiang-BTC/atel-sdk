@@ -312,10 +312,24 @@ async function pushTradeNotification(eventType, payload, body) {
   const templates = {
     'order_created': (p) => `📥 收到新订单\n订单: ${p.orderId || body?.orderId || '?'}\n金额: $${p.priceAmount ?? '?'} USDC\n来自: ${p.requesterDid || '未知请求方'}\n请审核后决定是否接单`,
     'order_accepted': (p) => `📋 订单已被接单\n订单: ${p.orderId || body?.orderId || '?'}\n执行方已开始处理，进入里程碑阶段`,
-    'milestone_submitted': (p) => `📝 里程碑 M${p.milestoneIndex ?? '?'} 已提交\n订单: ${p.orderId || body?.orderId || '?'}\n等待审核`,
-    'milestone_verified': (p) => `✅ 里程碑 M${p.milestoneIndex ?? '?'} 审核通过\n订单: ${p.orderId || body?.orderId || '?'}`,
-    'milestone_rejected': (p) => `❌ 里程碑 M${p.milestoneIndex ?? '?'} 被拒绝\n订单: ${p.orderId || body?.orderId || '?'}\n原因: ${p.rejectReason || '未说明'}`,
-    'order_settled': (p) => `💰 订单已结算完成\n订单: ${p.orderId || body?.orderId || '?'}\nUSDC 已支付`,
+    'milestone_submitted': (p) => {
+      const desc = p.milestoneDescription ? `\n目标: ${p.milestoneDescription}` : '';
+      const content = p.resultSummary ? `\n提交内容: ${String(p.resultSummary).substring(0, 200)}` : '';
+      return `📝 里程碑 M${p.milestoneIndex ?? '?'} 已提交\n订单: ${p.orderId || body?.orderId || '?'}${desc}${content}\n等待审核`;
+    },
+    'milestone_verified': (p) => {
+      const desc = p.milestoneDescription ? `\n目标: ${p.milestoneDescription}` : '';
+      const progress = p.totalMilestones ? `\n进度: ${(p.milestoneIndex ?? 0) + 1}/${p.totalMilestones}` : '';
+      return `✅ 里程碑 M${p.milestoneIndex ?? '?'} 审核通过\n订单: ${p.orderId || body?.orderId || '?'}${desc}${progress}`;
+    },
+    'milestone_rejected': (p) => {
+      const desc = p.milestoneDescription ? `\n目标: ${p.milestoneDescription}` : '';
+      return `❌ 里程碑 M${p.milestoneIndex ?? '?'} 被拒绝\n订单: ${p.orderId || body?.orderId || '?'}${desc}\n原因: ${p.rejectReason || '未说明'}`;
+    },
+    'order_settled': (p) => {
+      const amount = p.priceAmount ? `\n金额: $${p.priceAmount} USDC` : '';
+      return `💰 订单已结算完成\n订单: ${p.orderId || body?.orderId || '?'}${amount}\nUSDC 已支付`;
+    },
   };
   const tmpl = templates[eventType];
   if (!tmpl) return;
