@@ -18,13 +18,10 @@ export function shouldSkipAgentHook(eventType, directExecutionSucceeded) {
 }
 
 export function shouldUseGatewaySession(eventType) {
-  return [
-    'p2p_task',
-    'milestone_plan_confirmed',
-    'milestone_submitted',
-    'milestone_verified',
-    'milestone_rejected',
-  ].includes(eventType);
+  // Keep gateway sub-sessions only for explicit P2P task execution.
+  // Milestone automation must not depend on gateway callback health; use the
+  // local structured fallback so order progression cannot stall on subagent I/O.
+  return eventType === 'p2p_task';
 }
 
 export function normalizeGatewayBind(bind) {

@@ -192,6 +192,20 @@ function sanitizeAgentPrompt(promptText, meta = {}) {
   return truncated;
 }
 
+function isKnownUpstreamModelInputError(text) {
+  const value = String(text || '');
+  return value.includes('InternalError.Algo.InvalidParameter')
+    || value.includes('Range of input length should be [1, 258048]');
+}
+
+function summarizeAgentOutput(text, maxChars = 300) {
+  const raw = String(text || '');
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (isKnownUpstreamModelInputError(trimmed)) return '[suppressed upstream model input-length error]';
+  return trimmed.substring(0, maxChars);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Notification Target System — auto-discover gateway, manage targets
 // ═══════════════════════════════════════════════════════════════════
@@ -440,6 +454,18 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
   if (command.length === 0) {
     return { ok: false, skipped: true, reason: 'empty_command' };
   }
+  const actionKey = JSON.stringify(command);
+  if (globalThis.__atelActiveDirectActionKeys?.has(actionKey)) {
+    log({
+      event: 'recommended_action_direct_skip',
+      eventType,
+      dedupeKey,
+      action: action.action,
+      command,
+      reason: 'inflight_duplicate',
+    });
+    return { ok: true, skipped: true, reason: 'inflight_duplicate' };
+  }
 
   // Idempotency guard: short-circuit duplicate milestone plan/submit/verify actions
   // if the order or milestone has already advanced past the required state.
@@ -476,8 +502,10 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
           }
           const milestone = needsMilestoneIndex && Array.isArray(state?.milestones) ? state.milestones.find((m) => m.index === index) : null;
           if (needsMilestoneIndex && milestone) {
-            const expectedStatus = command[1] === 'milestone-verify' ? 'submitted' : 'pending';
-            if (milestone.status !== expectedStatus) {
+            const expectedStatuses = command[1] === 'milestone-verify'
+              ? ['submitted']
+              : (eventType === 'milestone_rejected' ? ['pending', 'rejected'] : ['pending']);
+            if (!expectedStatuses.includes(milestone.status)) {
               log({
                 event: 'recommended_action_direct_skip',
                 eventType,
@@ -509,10 +537,65 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
   const childCwd = command[0] === 'atel' ? getAtelWorkspaceRoot() : cwd;
 
   log({ event: 'recommended_action_direct_trigger', eventType, dedupeKey, action: action.action, command });
+  globalThis.__atelActiveDirectActionKeys ??= new Set();
+  globalThis.__atelActiveDirectActionKeys.add(actionKey);
 
   return await new Promise((resolve) => {
     execFile(childCmd, childArgs, { timeout: 180000, cwd: childCwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      globalThis.__atelActiveDirectActionKeys?.delete(actionKey);
       if (err) {
+        const combinedErrorText = String(stderr || err.message || '');
+        if (
+          command[0] === 'atel' &&
+          command[1] === 'milestone-feedback' &&
+          command.includes('--approve') &&
+          combinedErrorText.includes('order not in milestone_review status')
+        ) {
+          log({
+            event: 'recommended_action_direct_skip',
+            eventType,
+            dedupeKey,
+            action: action.action,
+            command,
+            reason: 'order_status_executing',
+          });
+          resolve({ ok: true, skipped: true, reason: 'order_status_executing' });
+          return;
+        }
+        if (
+          command[0] === 'atel' &&
+          command[1] === 'milestone-submit' &&
+          combinedErrorText.includes('milestone cannot be submitted in status: submitted')
+        ) {
+          log({
+            event: 'recommended_action_direct_skip',
+            eventType,
+            dedupeKey,
+            action: action.action,
+            command,
+            reason: 'milestone_status_submitted',
+          });
+          resolve({ ok: true, skipped: true, reason: 'milestone_status_submitted' });
+          return;
+        }
+        if (
+          command[0] === 'atel' &&
+          command[1] === 'milestone-verify' &&
+          (combinedErrorText.includes('milestone cannot be verified in status: verified') ||
+           combinedErrorText.includes('milestone not in submitted status') ||
+           combinedErrorText.includes('milestone cannot be verified in status: settled'))
+        ) {
+          log({
+            event: 'recommended_action_direct_skip',
+            eventType,
+            dedupeKey,
+            action: action.action,
+            command,
+            reason: 'milestone_already_processed',
+          });
+          resolve({ ok: true, skipped: true, reason: 'milestone_already_processed' });
+          return;
+        }
         log({
           event: 'recommended_action_direct_error',
           eventType,
@@ -532,7 +615,7 @@ async function executeRecommendedActionDirect(eventType, action, cwd, dedupeKey)
         dedupeKey,
         action: action.action,
         command,
-        stdout: (stdout || '').substring(0, 400),
+        stdout: summarizeAgentOutput(stdout, 400),
       });
       resolve({ ok: true, stdout });
     });
@@ -2904,6 +2987,178 @@ ${callbackFailed}
 `;
   }
 
+  function buildLocalAgentPrompt(eventType, promptText) {
+    if (eventType === 'milestone_submitted') {
+      return `${promptText}
+
+重要：你不是在和用户聊天。
+不要输出 markdown、代码块、解释、分析过程。
+你必须只输出一行 JSON。
+
+通过时：
+{"decision":"pass","summary":"简短通过原因"}
+
+拒绝时：
+{"decision":"reject","reason":"具体拒绝原因","summary":"简短审核结论"}`;
+    }
+
+    if (['milestone_plan_confirmed', 'milestone_verified', 'milestone_rejected'].includes(eventType)) {
+      return `${promptText}
+
+重要：你不是在和用户聊天。
+不要输出 markdown、标题、项目符号、解释、分析过程。
+你必须只输出一行 JSON。
+
+格式：
+{"result":"当前里程碑的真实交付内容"}`;
+    }
+
+    return promptText;
+  }
+
+  function normalizeLocalAgentStdout(stdout) {
+    const text = String(stdout || '').trim();
+    if (!text) return '';
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed?.payloads)) {
+        for (const item of parsed.payloads) {
+          const candidate = String(item?.text || '').trim();
+          if (candidate) return candidate;
+        }
+      }
+      if (typeof parsed?.text === 'string' && parsed.text.trim()) return parsed.text.trim();
+      if (typeof parsed?.result === 'string' && parsed.result.trim()) return JSON.stringify({ result: parsed.result.trim() });
+      if (typeof parsed?.decision === 'string') return JSON.stringify(parsed);
+    } catch {}
+    const fencedJson = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fencedJson?.[1]) return fencedJson[1].trim();
+    const jsonObjects = text.match(/\{[\s\S]*\}/g);
+    if (jsonObjects?.length) {
+      for (let i = jsonObjects.length - 1; i >= 0; i -= 1) {
+        const candidate = jsonObjects[i].trim();
+        try {
+          const parsed = JSON.parse(candidate);
+          if (Array.isArray(parsed?.payloads)) {
+            for (const item of parsed.payloads) {
+              const nested = String(item?.text || '').trim();
+              if (nested) return nested;
+            }
+          }
+          if (typeof parsed?.text === 'string' && parsed.text.trim()) return parsed.text.trim();
+          if (typeof parsed?.result === 'string' && parsed.result.trim()) return JSON.stringify({ result: parsed.result.trim() });
+          if (typeof parsed?.decision === 'string') return JSON.stringify(parsed);
+          return candidate;
+        } catch {}
+      }
+    }
+    const jsonLines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (let i = jsonLines.length - 1; i >= 0; i -= 1) {
+      const candidate = jsonLines[i];
+      if (!(candidate.startsWith('{') && candidate.endsWith('}'))) continue;
+      try {
+        JSON.parse(candidate);
+        return candidate;
+      } catch {}
+    }
+    return text;
+  }
+
+  function normalizeResult(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function sanitizeHookSessionId(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return `atel-hook-${Date.now()}`;
+    const cleaned = raw.replace(/[^a-zA-Z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
+    return (cleaned || `atel-hook-${Date.now()}`).slice(0, 120);
+  }
+
+  function isOpenClawAgentInvocation(cmd, args = []) {
+    const argv = [String(cmd || ''), ...args.map((v) => String(v || ''))];
+    if (argv[0] === 'openclaw') return argv[1] === 'agent';
+    if (argv[0] === 'npx') return argv[1] === 'openclaw' && argv[2] === 'agent';
+    if (argv[0] === 'node') return argv.includes('agent') && argv.some((v) => /openclaw/i.test(v));
+    return false;
+  }
+
+  function prepareHookInvocation(cmd, args = [], hookKey, timeoutSeconds) {
+    const nextArgs = [...args];
+    if (!isOpenClawAgentInvocation(cmd, nextArgs)) return { cmd, args: nextArgs };
+
+    if (!nextArgs.includes('--json')) {
+      const messageIndex = nextArgs.lastIndexOf('-m');
+      const insertAt = messageIndex >= 0 ? messageIndex : nextArgs.length;
+      nextArgs.splice(insertAt, 0, '--json');
+    }
+    if (!nextArgs.includes('--session-id')) {
+      const messageIndex = nextArgs.lastIndexOf('-m');
+      const insertAt = messageIndex >= 0 ? messageIndex : nextArgs.length;
+      nextArgs.splice(insertAt, 0, '--session-id', sanitizeHookSessionId(hookKey));
+    }
+    if (!nextArgs.includes('--timeout')) {
+      const messageIndex = nextArgs.lastIndexOf('-m');
+      const insertAt = messageIndex >= 0 ? messageIndex : nextArgs.length;
+      nextArgs.splice(insertAt, 0, '--timeout', String(timeoutSeconds));
+    }
+    if (!nextArgs.includes('--thinking')) {
+      const messageIndex = nextArgs.lastIndexOf('-m');
+      const insertAt = messageIndex >= 0 ? messageIndex : nextArgs.length;
+      nextArgs.splice(insertAt, 0, '--thinking', 'minimal');
+    }
+    return { cmd, args: nextArgs };
+  }
+
+  function buildLocalAgentActionFromStdout(eventType, payload, stdout) {
+    const cleaned = normalizeLocalAgentStdout(stdout);
+    if (!cleaned) return { ok: false, error: 'empty_local_agent_stdout' };
+
+    if (eventType === 'milestone_submitted') {
+      try {
+        const parsed = JSON.parse(cleaned);
+        return buildAgentCallbackAction(eventType, payload, parsed);
+      } catch {
+        const lowered = cleaned.toLowerCase();
+        if (lowered.startsWith('pass') || cleaned.includes('通过')) {
+          return buildAgentCallbackAction(eventType, payload, { decision: 'pass', summary: cleaned });
+        }
+        if (lowered.startsWith('reject') || cleaned.includes('拒绝')) {
+          return buildAgentCallbackAction(eventType, payload, { decision: 'reject', reason: cleaned, summary: cleaned });
+        }
+        return { ok: false, error: 'invalid_local_review_stdout' };
+      }
+    }
+
+    if (['milestone_plan_confirmed', 'milestone_verified', 'milestone_rejected'].includes(eventType)) {
+      try {
+        const parsed = JSON.parse(cleaned);
+        return buildAgentCallbackAction(eventType, payload, parsed);
+      } catch {
+        return buildAgentCallbackAction(eventType, payload, { result: cleaned, summary: cleaned });
+      }
+    }
+
+    return buildAgentCallbackAction(eventType, payload, { result: cleaned, summary: cleaned });
+  }
+
+  function buildMilestoneHookRecoveryKey(eventType, payload = {}) {
+    const orderId = String(payload?.orderId || '').trim();
+    if (!orderId) return '';
+    if (eventType === 'milestone_submitted') {
+      const stage = Number.isFinite(Number(payload?.milestoneIndex)) ? Number(payload.milestoneIndex) : 0;
+      const submitCount = Number.isFinite(Number(payload?.submitCount)) ? Number(payload.submitCount) : 0;
+      return `stage:${orderId}:requester:${stage}:${submitCount}`;
+    }
+    if (['milestone_plan_confirmed', 'milestone_verified', 'milestone_rejected'].includes(eventType)) {
+      const stage = eventType === 'milestone_plan_confirmed'
+        ? (Number.isFinite(Number(payload?.milestoneIndex)) ? Number(payload.milestoneIndex) : 0)
+        : (Number.isFinite(Number(payload?.currentMilestone)) ? Number(payload.currentMilestone) : Number.isFinite(Number(payload?.milestoneIndex)) ? Number(payload.milestoneIndex) : 0);
+      return `stage:${orderId}:executor:${stage}`;
+    }
+    return '';
+  }
+
   async function runGatewayAgentTask(eventType, dedupeKey, promptText, cwd, payload) {
     const gw = discoverGateway();
     const cfg = loadOpenClawConfig();
@@ -3074,9 +3329,10 @@ ${callbackFailed}
       const promptText = currentIndex === 0
         ? `你是ATEL接单方Agent。双方已确认方案，开始执行。\n订单原始要求：${orderDescription || '未提供'}\n当前里程碑 M0：${currentMilestone.title || ''}\n请只围绕这个订单要求完成当前里程碑，并通过回调返回最终交付内容。`
         : `你是ATEL接单方Agent。M${currentIndex - 1} 已通过审核。\n订单原始要求：${orderDescription || '未提供'}\n下一个里程碑 M${currentIndex}：${currentMilestone.title || ''}\n前面已通过的阶段结果如下：\n${previousApprovedOutputs || '无'}\n\n请严格基于这些已通过结果推进当前里程碑，不要自行假设缺失材料，也不要读取本地共享文件来补上下文。完成后通过回调返回最终交付内容。`;
-      const recoveryKey = `reconcile:${orderId}:executor:${currentIndex}`;
+      const recoveryKey = buildMilestoneHookRecoveryKey(eventType, payload);
+      log({ event: 'trade_reconcile_executor', orderId, currentMilestone: currentIndex, recoveryKey });
       const queued = queueAgentHook(eventType, recoveryKey, promptText, workspace.dir, payload, { recoveryKey });
-      if (queued) log({ event: 'trade_reconcile_executor', orderId, currentMilestone: currentIndex, recoveryKey });
+      if (queued) log({ event: 'trade_reconcile_executor_queued', orderId, currentMilestone: currentIndex, recoveryKey });
       return;
     }
 
@@ -3106,7 +3362,7 @@ ${callbackFailed}
         previousApprovedOutputs,
       };
       const promptText = `你是ATEL发单方Agent，需要审核执行方提交的工作。\n订单原始要求：${orderDescription || '未提供'}\n里程碑目标：${submittedMilestone.title || ''}\n前面已通过的阶段结果如下：\n${previousApprovedOutputs || '无'}\n提交内容：${submittedMilestone.resultSummary || ''}\n请只按该订单要求和前序已通过结果审慎决定通过还是拒绝，并通过回调返回 decision=pass 或 decision=reject。`;
-      const recoveryKey = `reconcile:${orderId}:requester:${submittedMilestone.index}:${submittedMilestone.submitCount || 0}`;
+      const recoveryKey = buildMilestoneHookRecoveryKey('milestone_submitted', payload);
       const queued = queueAgentHook('milestone_submitted', recoveryKey, promptText, workspace.dir, payload, { recoveryKey });
       if (queued) log({ event: 'trade_reconcile_requester', orderId, milestoneIndex: submittedMilestone.index, recoveryKey });
     }
@@ -3299,6 +3555,12 @@ ${callbackFailed}
     const autoTriggerEvents = ['order_accepted', 'milestone_plan_confirmed', 'milestone_submitted', 'milestone_verified', 'milestone_rejected'];
     const hasGatewayAction = Array.isArray(recommendedActions) && recommendedActions.some((action) => Array.isArray(action?.command) && action.command[0] === 'atel');
     if (agentCmd && prompt && autoTriggerEvents.includes(event) && !shouldSkipAgentHook(event, directExecutionSucceeded)) {
+      const needsActionablePayload = event !== 'milestone_submitted';
+      if (needsActionablePayload && !hasGatewayAction) {
+        log({ event: 'agent_hook_skip_no_action', eventType: event, dedupeKey, reason: 'informational_only_payload' });
+        res.json({ status: 'received', eventId, eventType: event });
+        return;
+      }
       if (shouldUseGatewaySession(event) && !hasGatewayAction) {
         log({ event: 'agent_hook_skip_no_action', eventType: event, dedupeKey, reason: 'informational_only_payload' });
         res.json({ status: 'received', eventId, eventType: event });
@@ -3318,13 +3580,17 @@ ${callbackFailed}
       } else {
         processedEvents.add('hook:' + dedupeKey);
 
-        // Build argv array
-        const parsedCmd = agentCmd.trim().split(/\s+/);
-        parsedCmd.push(enrichedPrompt);
-
-        // Queue the hook (serialize to avoid session lock conflicts)
-        hookQueue.push({ event, dedupeKey, cmd: parsedCmd[0], args: parsedCmd.slice(1), cwd: hookCwd, payload, recoveryKey: '' });
-        if (!hookBusy) processHookQueue();
+        const queued = queueAgentHook(
+          event,
+          dedupeKey,
+          enrichedPrompt,
+          hookCwd,
+          payload,
+          { recoveryKey: buildMilestoneHookRecoveryKey(event, payload) },
+        );
+        if (!queued) {
+          log({ event: 'agent_cmd_dedup_recovery_key', eventType: event, dedupeKey });
+        }
       }
     }
 
@@ -3353,11 +3619,18 @@ ${callbackFailed}
         return;
       }
       log({ event: 'agent_session_spawn_error', eventType: hookEvent, dedupeKey: hookKey, error: gatewayResult.error, fallback: 'cli' });
+      spawnArgs[spawnArgs.length - 1] = buildLocalAgentPrompt(hookEvent, promptArg);
+    } else if (spawnArgs.length > 0) {
+      const promptArg = spawnArgs[spawnArgs.length - 1] || '';
+      spawnArgs[spawnArgs.length - 1] = buildLocalAgentPrompt(hookEvent, promptArg);
     }
 
     const MAX_ATTEMPTS = 5;
-    const runHook = (attempt) => {
-      execFile(spawnCmd, spawnArgs, { timeout: 600000, cwd: hookCwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const isMilestoneHook = ['milestone_plan_confirmed', 'milestone_verified', 'milestone_rejected', 'milestone_submitted'].includes(hookEvent);
+    const localHookTimeoutMs = isMilestoneHook ? 180000 : 600000;
+    const preparedInvocation = prepareHookInvocation(spawnCmd, spawnArgs, hookKey, Math.ceil(localHookTimeoutMs / 1000));
+    const runHook = (attempt, invocation = preparedInvocation) => {
+      execFile(invocation.cmd, invocation.args, { timeout: localHookTimeoutMs, cwd: hookCwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         const errMsg = (err?.message || '') + (stderr || '');
         const isSessionLock = errMsg.includes('session file locked') || errMsg.includes('session locked');
         const isNetworkError = err && (err.killed || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET');
@@ -3373,8 +3646,40 @@ ${callbackFailed}
         } else if (err) {
           log({ event: 'agent_cmd_error', eventType: hookEvent, error: err.message, stderr: (stderr || '').substring(0, 200) });
           finishHook();
+        } else if (isKnownUpstreamModelInputError(stdout)) {
+          log({
+            event: 'agent_cmd_upstream_input_error',
+            eventType: hookEvent,
+            dedupeKey: hookKey,
+            note: 'suppressed known upstream model input-length error',
+          });
+          finishHook();
         } else {
-          log({ event: 'agent_cmd_done', eventType: hookEvent, stdout: (stdout || '').substring(0, 300) });
+          const localAction = buildLocalAgentActionFromStdout(hookEvent, hookPayload || {}, stdout);
+          if (!localAction.ok && localAction.error === 'empty_local_agent_stdout' && invocation.args.includes('--json')) {
+            const retryArgs = invocation.args.filter((arg) => arg !== '--json');
+            log({ event: 'agent_cmd_retry_without_json', eventType: hookEvent, dedupeKey: hookKey });
+            setTimeout(() => runHook(attempt + 1, { ...invocation, args: retryArgs }), 1000);
+            return;
+          }
+          if (localAction.ok && !localAction.skipped) {
+            executeRecommendedActionDirect(hookEvent, localAction.action, hookCwd || process.cwd(), hookKey)
+              .then((execResult) => {
+                if (execResult.ok) {
+                  log({ event: 'agent_cmd_done', eventType: hookEvent, mode: 'local_stdout_action', dedupeKey: hookKey, stdout: summarizeAgentOutput(stdout, 200) });
+                } else {
+                  log({ event: 'agent_cmd_local_action_error', eventType: hookEvent, dedupeKey: hookKey, error: execResult.error || 'local_action_failed', stdout: summarizeAgentOutput(stdout, 200) });
+                }
+                finishHook();
+              })
+              .catch((e) => {
+                log({ event: 'agent_cmd_local_action_error', eventType: hookEvent, dedupeKey: hookKey, error: e.message || 'local_action_failed', stdout: summarizeAgentOutput(stdout, 200) });
+                finishHook();
+              });
+            return;
+          }
+
+          log({ event: 'agent_cmd_done', eventType: hookEvent, stdout: summarizeAgentOutput(stdout, 300) });
           finishHook();
         }
       });
