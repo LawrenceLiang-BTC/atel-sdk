@@ -5689,7 +5689,8 @@ async function cmdTradeTask(capability, description) {
   if (!executorDid) {
     console.error(`[trade-task] Searching for executor with capability: ${capability}...`);
     const regClient = new RegistryClient({ registryUrl: REGISTRY_URL });
-    const results = await regClient.search({ type: capability, limit: 5 });
+    const searchResp = await regClient.search({ type: capability, limit: 5 });
+    const results = searchResp.agents || searchResp || [];
     if (results.length === 0) { console.error('[trade-task] No executor found for capability: ' + capability); process.exit(1); }
     // Pick best by trust score (if available), exclude self
     const candidates = results.filter(r => r.did !== id.did);
