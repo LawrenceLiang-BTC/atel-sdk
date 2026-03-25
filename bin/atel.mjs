@@ -319,8 +319,9 @@ async function pushTradeNotification(eventType, payload, body) {
     },
     'milestone_verified': (p) => {
       const desc = p.milestoneDescription ? `\n目标: ${p.milestoneDescription}` : '';
+      const content = p.resultSummary ? `\n提交内容: ${String(p.resultSummary).substring(0, 200)}` : '';
       const progress = p.totalMilestones ? `\n进度: ${(p.milestoneIndex ?? 0) + 1}/${p.totalMilestones}` : '';
-      return `✅ 里程碑 M${p.milestoneIndex ?? '?'} 审核通过\n订单: ${p.orderId || body?.orderId || '?'}${desc}${progress}`;
+      return `✅ 里程碑 M${p.milestoneIndex ?? '?'} 审核通过\n订单: ${p.orderId || body?.orderId || '?'}${desc}${content}${progress}`;
     },
     'milestone_rejected': (p) => {
       const desc = p.milestoneDescription ? `\n目标: ${p.milestoneDescription}` : '';

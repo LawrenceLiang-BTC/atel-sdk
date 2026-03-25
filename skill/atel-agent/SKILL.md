@@ -162,6 +162,8 @@ cd ~/atel-workspace
 atel order <executor-DID> general <金额> --desc "任务描述"
 ```
 
+⚠️ **`--desc` 是必填的，必须把用户的完整任务需求传进去。** 执行方只能通过 `--desc` 了解任务内容。如果不传或传空，执行方不知道要做什么，订单会失败。把用户说的任务要求（主题、字数、格式、具体要求等）全部写进 `--desc`。
+
 发单前确保钱包有 USDC（`atel balance` 查看）。
 
 ⚠️ 双链说明：
