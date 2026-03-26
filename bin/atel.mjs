@@ -52,6 +52,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
+import { cmdHub } from './hub-helpers.mjs';
 import { resolve, join, dirname } from 'node:path';
 import crypto from 'node:crypto';
 import {
@@ -8059,6 +8060,7 @@ const commands = {
     process.exit(1);
   },
   // Send (Rich Media P2P Message)
+  hub: () => cmdHub(args[0], args.slice(1), rawArgs),
   send: () => {
     if (rawArgs.includes('--help') || rawArgs.includes('-h') || args.length === 0) {
       showSendHelp();
