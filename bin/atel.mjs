@@ -6359,8 +6359,8 @@ async function cmdMilestoneFeedback(orderId) {
 
 async function cmdMilestoneSubmit(orderId, indexStr) {
   if (!orderId || indexStr === undefined) {
-    console.error('Usage: atel milestone-submit <orderId> <index> --result "结果描述"');
-    console.error('       atel milestone-submit <orderId> <index> --result ./file.pdf [--hash 0x...]');
+    console.error('Usage: atel milestone-submit <orderId> <index> --result "结果描述" [--file <path>]');
+    console.error('       atel milestone-submit <orderId> <index> --result ./file.pdf [--hash 0x...] [--file <path>]');
     process.exit(1);
   }
   const resultIdx = rawArgs.findIndex(a => a === '--result');
@@ -6394,11 +6394,35 @@ async function cmdMilestoneSubmit(orderId, indexStr) {
     resultHash = ethers.keccak256(ethers.toUtf8Bytes(result));
   }
 
-  console.log(`Submitting M${indexStr}: "${result.slice(0, 60)}${result.length > 60 ? '...' : ''}"`);
+  // --file support: upload attachment before submitting
+  let resultText = result;
+  const filePath = rawArgs.find((a, i) => rawArgs[i - 1] === '--file');
+  if (filePath) {
+    const { execFileSync } = await import('child_process');
+    const path = await import('path');
+    try {
+      const id = requireIdentity();
+      const uploadResult = execFileSync('curl', ['-s', '-X', 'POST',
+        `${PLATFORM_URL}/attachment/v1/upload`,
+        '-F', `file=@${filePath}`,
+        '-F', 'kind=file',
+        '-F', `uploadedBy=${id.did}`
+      ], { encoding: 'utf8' });
+      const uploadData = JSON.parse(uploadResult);
+      if (uploadData.attachmentId) {
+        resultText += `\n[Attachment: ${uploadData.attachmentId} (${path.basename(filePath)})]`;
+        console.error(`File uploaded: ${uploadData.attachmentId}`);
+      }
+    } catch (e) {
+      console.error(`File upload failed: ${e.message}`);
+    }
+  }
+
+  console.log(`Submitting M${indexStr}: "${resultText.slice(0, 60)}${resultText.length > 60 ? '...' : ''}"`);
   console.log(`Hash: ${resultHash}`);
 
   const data = await signedFetch('POST', `/trade/v1/order/${orderId}/milestone/${indexStr}/submit`, {
-    resultSummary: result,
+    resultSummary: resultText,
     resultHash,
   });
   console.log(JSON.stringify(data, null, 2));
@@ -6489,9 +6513,33 @@ async function cmdDispute(orderId, reason, description) {
 }
 
 async function cmdEvidence(disputeId, evidenceJson) {
-  if (!disputeId || !evidenceJson) { console.error('Usage: atel evidence <disputeId> <json>'); process.exit(1); }
+  if (!disputeId || !evidenceJson) { console.error('Usage: atel evidence <disputeId> <json> [--file <path>]'); process.exit(1); }
   let evidence;
   try { evidence = JSON.parse(evidenceJson); } catch { console.error('Invalid JSON'); process.exit(1); }
+
+  // --file support: upload attachment and attach to evidence
+  const filePath = rawArgs.find((a, i) => rawArgs[i - 1] === '--file');
+  if (filePath) {
+    const { execFileSync } = await import('child_process');
+    const path = await import('path');
+    try {
+      const id = requireIdentity();
+      const uploadResult = execFileSync('curl', ['-s', '-X', 'POST',
+        `${PLATFORM_URL}/attachment/v1/upload`,
+        '-F', `file=@${filePath}`,
+        '-F', 'kind=file',
+        '-F', `uploadedBy=${id.did}`
+      ], { encoding: 'utf8' });
+      const uploadData = JSON.parse(uploadResult);
+      if (uploadData.attachmentId) {
+        evidence.attachmentId = uploadData.attachmentId;
+        evidence.attachmentName = path.basename(filePath);
+        console.error(`File uploaded: ${uploadData.attachmentId}`);
+      }
+    } catch (e) {
+      console.error(`File upload failed: ${e.message}`);
+    }
+  }
 
   // Submit to Platform API
   const data = await signedFetch('POST', `/dispute/v1/${disputeId}/evidence`, { evidence });
@@ -6548,6 +6596,21 @@ async function cmdCertStatus(did) {
   const text = await res.text(); console.error("DEBUG Response:", text); const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   console.log(JSON.stringify(data, null, 2));
+
+  // Fetch and display certification requirements
+  try {
+    const reqResp = await fetch(`${PLATFORM_URL}/cert/v1/requirements`, { signal: AbortSignal.timeout(5000) });
+    if (reqResp.ok) {
+      const reqs = await reqResp.json();
+      console.log('\nCertification Requirements:');
+      if (reqs.certified) {
+        console.log(`  Certified: trust_score >= ${reqs.certified.minTrustScore}, cost: $${reqs.certified.cost}`);
+      }
+      if (reqs.enterprise) {
+        console.log(`  Enterprise: trust_score >= ${reqs.enterprise.minTrustScore}, cost: $${reqs.enterprise.cost}`);
+      }
+    }
+  } catch {}
 }
 
 async function cmdCertRenew(level) {
