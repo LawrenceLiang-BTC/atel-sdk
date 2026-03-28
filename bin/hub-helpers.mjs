@@ -65,6 +65,43 @@ async function hubFetch(path, options = {}) {
 
 // ─── Commands ────────────────────────────────────────────────────
 
+async function cmdHubSwap(usdcAmount, flags) {
+  if (!usdcAmount || isNaN(parseFloat(usdcAmount))) {
+    console.error('Usage: atel hub swap <usdc_amount> [--chain bsc|base]');
+    console.error('Example: atel hub swap 1.0 --chain bsc');
+    process.exit(1);
+  }
+  const amount = parseFloat(usdcAmount);
+  const chain = flags.chain || 'bsc';
+
+  // swap via platform (not tokenhub)
+  const { loadIdentity } = await import('./atel.mjs');
+  const id = loadIdentity();
+  const PLATFORM_URL = process.env.ATEL_PLATFORM || process.env.ATEL_REGISTRY || 'https://api.atelai.org';
+
+  // Use signedFetch from atel.mjs
+  const body = JSON.stringify({ usdc_amount: amount, chain });
+  const res = await fetch(PLATFORM_URL + '/account/v1/swap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(10000),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error('Swap failed:', data.error || JSON.stringify(data));
+    process.exit(1);
+  }
+  const tokenPerUSDC = data.token_per_usdc || 10000;
+  console.log('✓ Swap successful');
+  console.log(`  USDC spent:     $${amount.toFixed(6)}`);
+  console.log(`  ATELToken received: ${data.token_amount.toLocaleString()}`);
+  console.log(`  Rate:           1 USDC = ${tokenPerUSDC.toLocaleString()} ATEL`);
+  console.log(`  Platform balance after: $${parseFloat(data.balance_after).toFixed(6)} USDC`);
+  console.log('');
+  console.log('Run `atel hub balance` to check your ATELToken balance.');
+}
+
 async function cmdHubBalance() {
   const res = await hubFetch('/balance');
   const data = await res.json();
@@ -267,6 +304,7 @@ export async function cmdHub(sub, args, rawArgs) {
   try {
     switch (sub) {
       case 'balance': return await cmdHubBalance();
+      case 'swap':    return await cmdHubSwap(args[0], flags);
       case 'usage':   return await cmdHubUsage(flags);
       case 'topup':   return await cmdHubTopup();
       case 'models':  return await cmdHubModels(flags);
@@ -293,6 +331,7 @@ Commands:
   atel hub balance                          Show ATELToken balance
   atel hub usage [--model <id>] [--days 7]  Usage history
   atel hub topup                            Top-up instructions
+  atel hub swap <usdc> [--chain bsc|base]   Swap USDC → ATELToken
   atel hub models [--search <kw>]           List available models
   atel hub chat <model> "<prompt>" [--stream] Quick chat
   atel hub key create [--name <name>]       Create API key
