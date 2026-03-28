@@ -520,6 +520,18 @@ atel notify enable <id>                # 恢复通知
 atel notify test                       # 发送测试通知
 ```
 
+## Dashboard 授权
+
+用户可能会发给你一个 6 位授权码（如 `A7K3M9`），要求你连接 Dashboard。收到后直接执行：
+
+```bash
+cd ~/atel-workspace && atel auth <授权码>
+```
+
+成功后告诉用户"Dashboard 已连接"。
+
+---
+
 ## 重要规则
 
 1. **所有 atel 命令必须在 ~/atel-workspace 目录执行**

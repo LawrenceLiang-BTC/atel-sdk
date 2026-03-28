@@ -5614,6 +5614,45 @@ async function signedFetch(method, path, payload = {}) {
   return data;
 }
 
+// ─── Auth Command ────────────────────────────────────────────────
+
+async function cmdAuth(code) {
+  if (!code) {
+    console.error('Usage: atel auth <code>');
+    console.error('  Authorize a Dashboard session using the code displayed on the login page.');
+    process.exit(1);
+  }
+  const id = requireIdentity();
+  const { default: nacl } = await import('tweetnacl');
+  const { serializePayload } = await import('@lawrenceliang-btc/atel-sdk');
+
+  const ts = new Date().toISOString();
+  const payload = { code: code.toUpperCase(), did: id.did, timestamp: ts };
+  const signable = serializePayload({ payload, did: id.did, timestamp: ts });
+  const sig = Buffer.from(nacl.sign.detached(Buffer.from(signable), id.secretKey)).toString('base64');
+
+  try {
+    const resp = await fetch(`${ATEL_PLATFORM}/auth/v1/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code.toUpperCase(), did: id.did, signature: sig, timestamp: ts }),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      console.log('Authorization successful!');
+      console.log(`  Agent: ${data.name}`);
+      console.log(`  DID:   ${data.did}`);
+      console.log('  Dashboard is now connected to your agent.');
+    } else {
+      console.error(`Authorization failed: ${data.error}`);
+      process.exit(1);
+    }
+  } catch (e) {
+    console.error(`Failed to connect: ${e.message}`);
+    process.exit(1);
+  }
+}
+
 // ─── Account Commands ────────────────────────────────────────────
 
 async function cmdBalance() {
@@ -8058,6 +8097,8 @@ const commands = {
     console.error('  status [--json]');
     process.exit(1);
   },
+  // Auth (Dashboard authorization code login)
+  auth: () => cmdAuth(args[0]),
   // Send (Rich Media P2P Message)
   send: () => {
     if (rawArgs.includes('--help') || rawArgs.includes('-h') || args.length === 0) {
@@ -8254,6 +8295,9 @@ Protocol Commands:
   verify-proof <anchor_tx> <root>      Verify on-chain proof
   audit <did_or_url> <taskId>          Deep audit: fetch trace + verify hash chain
   rotate                               Rotate identity key pair (backup + on-chain anchor)
+
+Auth Commands:
+  auth <code>                          Authorize Dashboard login (enter code from login page)
 
 Account Commands:
   balance                              Show platform account balance
